@@ -26,6 +26,23 @@
   accounts per distinct code, mainnet 28.2; slices of the embedded OZ ERC20
   runtime, not random bytes — real code reuses heavily and compresses under
   LZ4). Rotates the auto-fill goldens.
+- **RocksDB writers now force bottommost compaction on close (besu, ethrex,
+  nethermind, reth).** The Close-time `CompactRange` left
+  `bottommost_level_compaction` at its default `kIfHaveCompactionFilter`, and
+  no compaction filter is configured — so RocksDB *trivially moved* the
+  flushed L0 files into the empty bottom level instead of rewriting them. The
+  tree looked flat, but every file kept `largest_seqno != 0`, and RocksDB
+  rewrites exactly those files the moment the opening client releases its
+  first snapshot (`ComputeBottommostFilesMarkedForCompaction`). Measured on a
+  4 GB Besu store: the 1,606 MB `ACCOUNT_STORAGE_STORAGE` CF had 10
+  bottommost files all carrying seqnos, and one snapshot release cost the
+  client a ~55 s full-CF rewrite; with `KForce` it is 0 files and no
+  compaction. The rewrite is not visible while a node idles — it needs one
+  snapshot release — and it recurs on every restart that does not finish it.
+  Costs one extra bottom-level pass at generation (~120 MB/s; +82 s on a
+  4 GB store, ≈42 min on 350 GB). reth previously ran no Close-time
+  compaction at all on its RocksDB history CFs; it now does (a no-op unless
+  `--archive`).
 
 ### Added
 - **Nethermind flat-DB state generation (closes #111).** `--client=nethermind`

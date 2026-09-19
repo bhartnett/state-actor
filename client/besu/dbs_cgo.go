@@ -4,10 +4,12 @@ package besu
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/linxGnu/grocksdb"
 
@@ -200,6 +202,15 @@ func openBesuDB(datadir string) (*besuDB, error) {
 // Before closing, runs a full-range CompactRange on every user CF so the LSM
 // tree is flat when Besu later opens this DB — pays the deferred cost from
 // the bulk write's suppressed compactions, parallelised across MaxBackgroundJobs.
+//
+// bottommost_level_compaction=KForce is load-bearing, not tuning. At the
+// default (kIfHaveCompactionFilter, and no filter is configured) RocksDB
+// TRIVIALLY MOVES L0 files into the empty bottom level: the tree is flat,
+// but every file keeps largest_seqno != 0, so the first client to open the
+// DB marks them all for compaction (ComputeBottommostFilesMarkedForCompaction)
+// and rewrites the whole state — on every restart, since the rewrite never
+// finishes writing seqno-0 files if it is interrupted. KForce rewrites them
+// here instead, once: ~120 MB/s, ≈42 min on a 350 GB store.
 func (b *besuDB) Close() {
 	if b.db != nil {
 		// CompactRange the written CFs only. The Default CF and the
@@ -208,6 +219,9 @@ func (b *besuDB) Close() {
 		// are empty in our usage; the Blockchain CF receives few writes
 		// at genesis and a CompactRange on it is near-instant.
 		emptyRange := grocksdb.Range{Start: nil, Limit: nil}
+		cro := grocksdb.NewCompactRangeOptions()
+		defer cro.Destroy()
+		cro.SetBottommostLevelCompaction(grocksdb.KForce)
 		for _, idx := range []int{
 			cfIdxAccountInfoState,
 			cfIdxCodeStorage,
@@ -217,7 +231,9 @@ func (b *besuDB) Close() {
 			cfIdxVariables,
 		} {
 			if idx < len(b.cfs) && b.cfs[idx] != nil {
-				b.db.CompactRangeCF(b.cfs[idx], emptyRange)
+				start := time.Now()
+				b.db.CompactRangeCFOpt(b.cfs[idx], emptyRange, cro)
+				log.Printf("  besu: compacted cf %x in %s", keys.BonsaiCFNames()[idx], time.Since(start).Round(time.Second))
 			}
 		}
 	}

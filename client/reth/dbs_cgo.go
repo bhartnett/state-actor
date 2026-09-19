@@ -272,7 +272,11 @@ func requireFreshDir(dataDir string) error {
 // On the RocksDB side, FlushCFs forces the per-CF memtables to land as
 // SST files before Close. Bulk writes go through historySink with
 // WAL-disabled, so without this flush reth's first read could see an
-// empty CF whose state lived only in the now-discarded memtable.
+// empty CF whose state lived only in the now-discarded memtable. The
+// flushed files are then compacted (bottommost forced, so they land with
+// largest_seqno == 0 rather than being marked for compaction by the reth
+// that opens them). Empty in default mode — the history CFs only receive
+// writes under --archive — so this costs nothing there.
 func (e *Envs) Close() error {
 	if e == nil || e.closed {
 		return nil
@@ -300,6 +304,12 @@ func (e *Envs) Close() error {
 				firstErr = fmt.Errorf("rocksdb.FlushCFs: %w", err)
 			}
 		}
+		cro := grocksdb.NewCompactRangeOptions()
+		cro.SetBottommostLevelCompaction(grocksdb.KForce)
+		for _, cf := range cfs {
+			e.RocksDB.CompactRangeCFOpt(cf, grocksdb.Range{}, cro)
+		}
+		cro.Destroy()
 		flushOpts.Destroy()
 		for _, cf := range e.RocksCFs {
 			cf.Destroy()

@@ -4,8 +4,10 @@ package nethermind
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/linxGnu/grocksdb"
 
@@ -262,8 +264,19 @@ func openNethDBs(dataDir string) (*nethDBs, error) {
 // Before closing each DB, runs a full-range CompactRange so the LSM tree is
 // flat when Nethermind later opens it — pays the deferred-compaction cost
 // from the bulk write, parallelised across MaxBackgroundJobs.
+//
+// bottommost_level_compaction=KForce is load-bearing: at the default
+// (kIfHaveCompactionFilter, and no filter is configured) RocksDB trivially
+// MOVES L0 files into the empty bottom level, leaving a flat tree whose
+// files all carry largest_seqno != 0 — which the first Nethermind to open
+// the DB marks for compaction and rewrites wholesale, on every restart.
+// KForce pays that rewrite here, once.
 func (d *nethDBs) Close() {
 	emptyRange := grocksdb.Range{Start: nil, Limit: nil}
+	cro := grocksdb.NewCompactRangeOptions()
+	defer cro.Destroy()
+	cro.SetBottommostLevelCompaction(grocksdb.KForce)
+	start := time.Now()
 
 	// Compact the high-volume DBs (state, code) before close. Tiny DBs
 	// like headers/blockNumbers are no-ops in practice but the call is
@@ -273,23 +286,24 @@ func (d *nethDBs) Close() {
 		d.blockNumbers, d.blockInfos,
 	} {
 		if db != nil {
-			db.CompactRange(emptyRange)
+			db.CompactRangeOpt(emptyRange, cro)
 		}
 	}
 	if d.receipts != nil {
 		for _, cf := range d.receiptsCFs {
 			if cf != nil {
-				d.receipts.CompactRangeCF(cf, emptyRange)
+				d.receipts.CompactRangeCFOpt(cf, emptyRange, cro)
 			}
 		}
 	}
 	if d.flat != nil {
 		for _, cf := range d.flatCFs {
 			if cf != nil {
-				d.flat.CompactRangeCF(cf, emptyRange)
+				d.flat.CompactRangeCFOpt(cf, emptyRange, cro)
 			}
 		}
 	}
+	log.Printf("  nethermind: compacted all DBs in %s", time.Since(start).Round(time.Second))
 
 	for _, h := range d.receiptsCFs {
 		if h != nil {

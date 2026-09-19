@@ -413,9 +413,19 @@ func openEthrexDB(dbPath string) (*ethrexDB, error) {
 // pool (max_background_jobs), turning a serial CF-by-CF wait into a parallel
 // one. This is the dominant cost at large DB sizes, where the bulk write
 // phase is I/O/compaction-bound rather than CPU-bound.
+//
+// bottommost_level_compaction=KForce is load-bearing: at the default
+// (kIfHaveCompactionFilter, and no filter is configured) RocksDB trivially
+// MOVES L0 files into the empty bottom level, leaving a flat tree whose
+// files all carry largest_seqno != 0 — which the first ethrex to open the
+// DB marks for compaction and rewrites wholesale. KForce pays that rewrite
+// here, once.
 func (d *ethrexDB) Close() {
 	if d.db != nil {
 		emptyRange := grocksdb.Range{Start: nil, Limit: nil}
+		cro := grocksdb.NewCompactRangeOptions()
+		defer cro.Destroy()
+		cro.SetBottommostLevelCompaction(grocksdb.KForce)
 		// Serial, mirroring the besu and nethermind writers. The 12-goroutine
 		// fan-out this replaces bought little — max_background_jobs
 		// (bulkBackgroundJobs) already floored real parallelism at 8 — and
@@ -449,7 +459,7 @@ func (d *ethrexDB) Close() {
 		} {
 			if idx < len(d.cfs) && d.cfs[idx] != nil {
 				start := time.Now()
-				d.db.CompactRangeCF(d.cfs[idx], emptyRange)
+				d.db.CompactRangeCFOpt(d.cfs[idx], emptyRange, cro)
 				log.Printf("  ethrex: compacted %s in %s · mem %s · %s",
 					ethrexinternal.Tables[idx],
 					time.Since(start).Round(time.Second),
