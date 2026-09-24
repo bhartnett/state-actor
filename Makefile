@@ -397,6 +397,21 @@ ERIGON_SUITE_VOL ?= erigon-suite-datadir
 test-erigon-suite: image-erigon
 	mkdir -p $(RESULT_DIR)
 	docker volume rm -f $(ERIGON_SUITE_VOL) >/dev/null 2>&1 || true
+	docker volume create $(ERIGON_SUITE_VOL)
+	docker run --rm \
+	  -v $(ERIGON_SUITE_VOL):/oracle-data \
+	  -v $(RESULT_DIR):/result \
+	  -v $(shell command -v $(SPAMOOR) 2>/dev/null || echo /dev/null):/usr/local/bin/spamoor:ro \
+	  -v /var/run/docker.sock:/var/run/docker.sock \
+	  -e ERIGON_ORACLE_DATADIR=/oracle-data \
+	  -e ERIGON_ORACLE_VOL=$(ERIGON_SUITE_VOL) \
+	  -e ERIGON_DOCKER_PLATFORM \
+	  -e RESULT_PATH=/result/erigon-result.json \
+	  -e SPAMOOR=/usr/local/bin/spamoor \
+	  -e REQUIRE_SPAMOOR=1 \
+	  state-actor-erigon-builder:latest \
+	  go test -tags 'cgo_erigon oracle' ./client/erigon/ -v -timeout 3600s
+	docker volume rm -f $(ERIGON_SUITE_VOL) >/dev/null 2>&1 || true
 
 ## image-nimbus: Build the cgo_nimbus Docker builder image for direct-write nimbus
 ##   Used by test-nimbus-suite. Also reused by CI's per-job docker build.
@@ -437,21 +452,6 @@ test-nimbus-suite: image-nimbus
 	  state-actor-nimbus-builder:latest \
 	  go test -tags 'cgo_nimbus oracle' ./client/nimbus/ -v -timeout 3600s
 	docker volume rm -f $(NIMBUS_SUITE_VOL) >/dev/null 2>&1 || true
-	docker volume create $(ERIGON_SUITE_VOL)
-	docker run --rm \
-	  -v $(ERIGON_SUITE_VOL):/oracle-data \
-	  -v $(RESULT_DIR):/result \
-	  -v $(shell command -v $(SPAMOOR) 2>/dev/null || echo /dev/null):/usr/local/bin/spamoor:ro \
-	  -v /var/run/docker.sock:/var/run/docker.sock \
-	  -e ERIGON_ORACLE_DATADIR=/oracle-data \
-	  -e ERIGON_ORACLE_VOL=$(ERIGON_SUITE_VOL) \
-	  -e ERIGON_DOCKER_PLATFORM \
-	  -e RESULT_PATH=/result/erigon-result.json \
-	  -e SPAMOOR=/usr/local/bin/spamoor \
-	  -e REQUIRE_SPAMOOR=1 \
-	  state-actor-erigon-builder:latest \
-	  go test -tags 'cgo_erigon oracle' ./client/erigon/ -v -timeout 3600s
-	docker volume rm -f $(ERIGON_SUITE_VOL) >/dev/null 2>&1 || true
 
 ## help: Show this help
 help:

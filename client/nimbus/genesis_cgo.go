@@ -22,7 +22,9 @@ import (
 //
 // The canonical-head row is the presence check initializeDb uses; a crash
 // before it leaves nimbus re-running its own genesis init (which would fail
-// loudly on the non-empty state), which is the desired behaviour.
+// loudly on the non-empty state), which is the desired behaviour. The data CFs
+// are flushed to SST first: the bulk vertex and code rows skipped the WAL, so
+// without the flush the gate could survive a crash that the state did not.
 func writeGenesisBlock(db *nimbusDB, header *types.Header) error {
 	hash := header.Hash()
 	headerRLP, err := gethrlp.EncodeToBytes(header)
@@ -46,6 +48,9 @@ func writeGenesisBlock(db *nimbusDB, header *types.Header) error {
 	}
 	if err := db.put(cfIdxKvtGen, nimbusinternal.KeyFcu(nimbusinternal.FcuHead), nimbusinternal.FcuValue(0, hash)); err != nil {
 		return fmt.Errorf("nimbus: write fcuHead: %w", err)
+	}
+	if err := db.flushData(); err != nil {
+		return fmt.Errorf("nimbus: flush state before canonical head: %w", err)
 	}
 	if err := db.putSync(cfIdxKvtGen, nimbusinternal.KeyCanonicalHead, rlpHash); err != nil {
 		return fmt.Errorf("nimbus: write canonical head: %w", err)

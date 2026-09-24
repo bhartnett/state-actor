@@ -362,7 +362,6 @@ docker build -f Dockerfile.nimbus -t state-actor-nimbus .
 docker run --rm \
   -v /tmp/sa-nimbus:/data \
   state-actor-nimbus \
-  ./state-actor \
   --client=nimbus --db=/data \
   --target-size=100MB \
   --seed=42 \

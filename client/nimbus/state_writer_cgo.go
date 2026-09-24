@@ -63,8 +63,9 @@ func phase2Workers() int {
 //     with stoID/stoHint) to the account-trie Builder on the shared sink.
 //
 // After the pipeline the admin record (vTop = allocator high-water mark,
-// serial 0) is written with sync. Every AriVtx row is then durable before
-// run_cgo.go writes the genesis rows and the canonical-head boot gate.
+// serial 0) is written with sync. The bulk rows before it skipped the WAL and
+// are only made durable by writeGenesisBlock's flush, ahead of the
+// canonical-head boot gate.
 func writeState(
 	ctx context.Context,
 	cfg generator.Config,

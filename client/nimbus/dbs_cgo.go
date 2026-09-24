@@ -288,6 +288,17 @@ func (d *nimbusDB) put(cfIdx int, key, value []byte) error {
 	return d.db.PutCF(wo, d.cfs[cfIdx], key, value)
 }
 
+// flushData forces the AriVtx and KvtGen memtables to SST and waits. The bulk
+// vertex and code rows are written with the WAL disabled, so until this runs
+// they live only in memory — a later sync write does not make them durable.
+func (d *nimbusDB) flushData() error {
+	fo := grocksdb.NewDefaultFlushOptions()
+	defer fo.Destroy()
+	fo.SetWait(true)
+	cfs := []*grocksdb.ColumnFamilyHandle{d.cfs[cfIdxAriVtx], d.cfs[cfIdxKvtGen]}
+	return d.db.FlushCFs(cfs, fo)
+}
+
 // putSync writes one row with sync=true — for the admin record and the
 // canonical-head boot gate, which must be the last durable writes.
 func (d *nimbusDB) putSync(cfIdx int, key, value []byte) error {
