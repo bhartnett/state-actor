@@ -69,7 +69,7 @@ var (
 	archive = flag.Bool("archive", false, "Configure the generated DB for archive-mode operation.\n"+
 		"  reth: writes StoragesHistory + AccountsHistory + StorageChangeSets + AccountChangeSets at genesis.\n"+
 		"  geth: writes PathDB archive-anchor metadata for --gcmode=archive boots.\n"+
-		"Rejected for besu, nethermind, ethrex, and nimbus (no archive code path).")
+		"Rejected for besu, nethermind, and nimbus (no archive code path).")
 )
 
 func main() {

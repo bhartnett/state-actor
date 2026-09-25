@@ -67,7 +67,7 @@ State Actor generates Ethereum state in three phases:
 │  │  ┌─────────────────────────────────────────────────────────────┐   │ │
 │  │  │       Per-client Writer (client/<name>/)                    │   │ │
 │  │  │  • generator.Writer interface                               │   │ │
-│  │  │  • geth: pure-Go Pebble. the other six: cgo.                 │   │ │
+│  │  │  • geth: pure-Go Pebble. reth/besu/nethermind/nimbus: cgo.  │   │ │
 │  │  └─────────────────────────────────────────────────────────────┘   │ │
 │  └─────────────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -257,11 +257,9 @@ configurable worker pool / batch size at the generator level.
   sidecar (empty alloc; boot with `--debug-rewrite-datadir-id`). Behind
   the `cgo_nimbus` build tag.
 
-Only the geth adapter implements the `generator.Writer` interface
-(`WriteAccount`, `WriteStorage`, `WriteCode`, `SetStateRoot`, …) behind
-`generator.New`; every cgo adapter exposes a standalone
-`Run(ctx, cfg, Options)` that owns its whole pipeline (trie hashing
-included) and is dispatched directly from `main.go`.
+Each adapter implements the `generator.Writer` interface
+(`WriteAccount`, `WriteStorage`, `WriteCode`, `SetStateRoot`, …); the
+generator core only sees the abstract Writer surface.
 
 ### 5. Genesis Block Writing
 
@@ -336,12 +334,11 @@ are implementation details of the writer adapter.
 
 ## Client Adapters
 
-Each client/<name>/ package owns its target client's on-disk format
-end-to-end: key encoding, batching, genesis-block wire format, and any
-client-specific metadata. geth plugs into the generator core through the
-`generator.Writer` interface (WriteAccount, WriteStorage, WriteCode,
-SetStateRoot, …); the cgo clients expose `Run(ctx, cfg, Options)` and
-consume `generator.Config` directly.
+State writers are pluggable via the `generator.Writer` interface. Each
+client/<name>/ package owns its target client's on-disk format end-to-end:
+key encoding, batching, genesis-block wire format, and any client-specific
+metadata. The generator core only sees the abstract Writer surface
+(WriteAccount, WriteStorage, WriteCode, SetStateRoot, …).
 
 Clients register themselves as the default writer factory via init():
 
