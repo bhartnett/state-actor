@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math/bits"
+	mrand "math/rand"
 	"math/rand/v2"
 	"runtime"
 	"slices"
@@ -76,6 +77,7 @@ type Giant struct {
 
 // Giant returns giant k (0 <= k < p.Giants, largest first) as a pure function of (seed, k). It never
 // touches the auto-fill rng, so giants can be generated in any order, concurrently with the draws.
+// A non-nil AccountModel draws the nonce and balance (AccountModel.DrawStorageNonceBalance).
 func (p *Plan) Giant(seed int64, k int) *Giant {
 	i := p.Giants - k // stratum, 1-based
 	addrHash := giantHash("addr", seed, i)
@@ -91,6 +93,9 @@ func (p *Plan) Giant(seed int64, k int) *Giant {
 		slotSeed: binary.BigEndian.Uint64(giantHash("storage", seed, i).Bytes()),
 	}
 	copy(g.Address[:], addrHash[12:])
+	if p.AccountModel != nil {
+		g.Nonce, g.Balance = p.AccountModel.DrawStorageNonceBalance(mrand.New(mrand.NewSource(int64(binary.BigEndian.Uint64(h[16:24])))))
+	}
 	g.AddrHash = crypto.Keccak256Hash(g.Address[:])
 	return g
 }

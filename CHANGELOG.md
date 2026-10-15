@@ -107,6 +107,14 @@
   `--archive`).
 
 ### Added
+- **`--account-model=mainnet` draws auto-fill accounts from a mainnet census.**
+  `normal` (default) is unchanged. `mainnet` draws each storage-less account's
+  class (EOA, EIP-7702 delegation, contract), nonce and balance size, and the
+  contract's code from a census of a mainnet-derived reth store's 354.8M
+  accounts: mostly a few reused 45-byte clone codes, as on mainnet's 41.7M
+  storage-less contracts. Storage accounts, giants included, take the census's
+  nonce/balance shape. Not supported with `--binary-trie`. Changes the state
+  root; recorded in the manifest and restored by `reproduce`.
 - **`--storage-model=mainnet` draws auto-fill contract storage from a mainnet
   shape.** `normal` (default) gives every contract ~35 KiB of 32-byte random
   values, so a mainnet-sized store holds a few million mid-size contracts.

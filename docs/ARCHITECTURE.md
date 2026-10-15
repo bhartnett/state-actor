@@ -307,6 +307,11 @@ are generated on demand and streamed in keccak order (`Giant.Sorted`, fed to
 `streamingtrie.SortedRoot` in each writer's Phase 0 pool; erigon encodes them
 in chunks on its worker pool), never materialized or sorted through a temp store.
 
+`--account-model=mainnet` replaces the EOA draw with a census of mainnet
+accounts ([`internal/autofill/mainnet_account_table.go`](../internal/autofill/mainnet_account_table.go)):
+account class, nonce and balance size, and storage-less contract code; storage
+accounts and giants take the census's nonce/balance shape.
+
 Spec-loaded entities (`--spec`) are separate: their distribution comes
 from the YAML schema (per-entity `approximate_size_bytes` resolved via
 `internal/sizecal.SlotsForBytes`) and is independent of the auto-fill

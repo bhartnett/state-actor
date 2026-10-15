@@ -47,6 +47,9 @@ func TestValidateForClient_BinaryTrieGethOnly(t *testing.T) {
 	if err := ValidateForClient("geth", FlagValues{BinaryTrie: true, StorageModel: "mainnet"}); err == nil {
 		t.Error("geth + --binary-trie + --storage-model=mainnet should be rejected")
 	}
+	if err := ValidateForClient("geth", FlagValues{BinaryTrie: true, AccountModel: "mainnet"}); err == nil {
+		t.Error("geth + --binary-trie + --account-model=mainnet should be rejected")
+	}
 	for _, c := range []string{"nethermind", "besu", "reth", "erigon", "ethrex"} {
 		err := ValidateForClient(c, FlagValues{BinaryTrie: true})
 		if err == nil || !strings.Contains(err.Error(), "EIP-7864") {

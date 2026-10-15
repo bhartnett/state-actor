@@ -24,6 +24,9 @@ type Plan struct {
 	DistinctBytecodes int
 	// StorageModel selects how DrawContract sizes and fills a contract's storage.
 	StorageModel StorageModel
+	// AccountModel shapes DrawEOA's storage-less accounts and every storage account's nonce and
+	// balance (account_model.go); nil is the normal model.
+	AccountModel *AccountModel
 	// Giants is the StorageMainnet contract count at or above GiantMinSlots (see Giant), not
 	// counted in NumContracts; GiantSlots is their slot total.
 	Giants     int
@@ -166,10 +169,13 @@ func PlanForBudgetProfile(topUp uint64, profile Profile, model StorageModel) (*P
 	}, nil
 }
 
-// DrawEOA produces one synthetic EOA, advancing rng by the canonical 3
-// entitygen.GenerateEOA draws plus 2 Bernoulli Float64s plus a conditional
-// pool-index draw (when the delegation Bernoulli fires).
+// DrawEOA produces one synthetic EOA. Under the normal model it advances rng by the canonical 3
+// entitygen.GenerateEOA draws plus 2 Bernoulli Float64s plus a conditional pool-index draw (when
+// the delegation Bernoulli fires); a non-nil AccountModel draws per AccountModel.drawEOA instead.
 func (p *Plan) DrawEOA(rng *mrand.Rand) *entitygen.Account {
+	if p.AccountModel != nil {
+		return p.AccountModel.drawEOA(rng, p.SkipDerivedHashes)
+	}
 	if p.SkipDerivedHashes {
 		return GenerateEOAFlavoredLean(rng, p.EOAFlavors)
 	}
@@ -182,7 +188,8 @@ func (p *Plan) DrawEOA(rng *mrand.Rand) *entitygen.Account {
 //     rng.Float64 under StorageMainnet;
 //  2. rng.Intn(DistinctBytecodes) — code-pool index (see poolCode);
 //  3. entitygen.GenerateContractWithCode(rng, code, hash, numSlots, valueLen), valueLen
-//     non-nil (mainnet value lengths) only under StorageMainnet.
+//     non-nil (mainnet value lengths) only under StorageMainnet; AccountModel.drawContract
+//     instead under a non-nil AccountModel.
 func (p *Plan) DrawContract(rng *mrand.Rand) *entitygen.Account {
 	var numSlots int
 	var valueLen func(*mrand.Rand) int
@@ -192,5 +199,8 @@ func (p *Plan) DrawContract(rng *mrand.Rand) *entitygen.Account {
 		numSlots = max(int(p.StorageSampler.Draw(rng)/sizecal.BytesPerSlot("")), 1)
 	}
 	code, hash := poolCode(rng.Intn(p.DistinctBytecodes), p.CodeSampler)
+	if p.AccountModel != nil {
+		return p.AccountModel.drawContract(rng, code, hash, numSlots, valueLen)
+	}
 	return entitygen.GenerateContractWithCode(rng, code, hash, numSlots, valueLen)
 }

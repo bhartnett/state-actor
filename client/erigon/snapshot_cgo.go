@@ -429,8 +429,9 @@ func writeSnapshots(
 			if acc.StateAccount.Balance != nil {
 				entry.Balance = acc.StateAccount.Balance.ToBig()
 			}
-			// EIP-7702 designator (2 % of autofill EOAs): mirror geth state_writer.go or
-			// CodeHash diverges from the MPT root (cross-client bench 2026-06-03, SEED=42).
+			// Code-bearing EOA (7702 designator, or arbitrary code under the mainnet
+			// account model): mirror geth state_writer.go or CodeHash diverges from
+			// the MPT root (cross-client bench 2026-06-03, SEED=42).
 			if len(acc.Code) > 0 {
 				entry.Code = acc.Code
 				stats.CodeBytes += uint64(len(acc.Code))

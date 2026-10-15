@@ -52,6 +52,7 @@ var (
 
 	autofillProfile = flag.String("autofill-profile", "mainnet", "Auto-fill byte-split profile: 'mainnet' (20/10/70 account/code/storage, default) or 'accounts' (account-trie only — all EOAs, no contracts/storage). 'accounts' generates account-dominated tries for low-memory big-trie validation; it stays on the streaming DrawEOA path, so all clients must use the same value + --seed for cross-client state-root invariance.")
 	storageModel    = flag.String("storage-model", "normal", "Auto-fill contract storage: 'normal' (default: every contract ~35 KiB of 32-byte random values) or 'mainnet' (slot counts and value lengths calibrated on a mainnet-derived reth store: most contracts hold 1-3 slots, values are compact, and contracts above 1M slots follow a power law with no cap; the contract count follows from the storage budget). Changes the state root; all clients must use the same value + --seed for cross-client state-root invariance. Not supported with --binary-trie.")
+	accountModel    = flag.String("account-model", "normal", "Auto-fill account shape: 'normal' (default) or 'mainnet' (class, nonce/balance size and storage-less contract code drawn from a mainnet-derived reth store's account census; storage accounts take its nonce/balance shape). Changes the state root; all clients must use the same value + --seed for cross-client state-root invariance. Not supported with --binary-trie.")
 
 	fork      = flag.String("fork", "", "Hard fork active at genesis. Empty (default) resolves to the latest fork the chosen --client can write. Use --list-forks to see all values.")
 	listForks = flag.Bool("list-forks", false, "Print the list of accepted --fork values and exit.")
@@ -168,6 +169,7 @@ func generate(reproducedFrom string) *generator.Stats {
 		MdbxFillProfile:    *mdbxFillProfile,
 		MdbxFillOverridden: len(mdbxFillOverrides) > 0,
 		StorageModel:       *storageModel,
+		AccountModel:       *accountModel,
 	}); err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -296,6 +298,9 @@ func generate(reproducedFrom string) *generator.Stats {
 			}
 			plan, err := autofill.PlanForBudgetProfile(topUp, profile, model)
 			if err != nil {
+				log.Fatalf("auto-fill: %v", err)
+			}
+			if plan.AccountModel, err = autofill.ParseAccountModel(*accountModel); err != nil {
 				log.Fatalf("auto-fill: %v", err)
 			}
 			config.AutoFill = plan
@@ -488,6 +493,7 @@ func generate(reproducedFrom string) *generator.Stats {
 			MdbxFillProfile: *mdbxFillProfile,
 			MdbxFill:        *mdbxFill,
 			StorageModel:    *storageModel,
+			AccountModel:    *accountModel,
 		},
 		Spec: specFileEntry,
 		Result: &manifest.Result{
@@ -635,6 +641,10 @@ func reproduce(args []string) {
 	*storageModel = m.Flags.StorageModel
 	if *storageModel == "" {
 		*storageModel = "normal"
+	}
+	*accountModel = m.Flags.AccountModel
+	if *accountModel == "" {
+		*accountModel = "normal"
 	}
 	*dbPath = *outDB
 

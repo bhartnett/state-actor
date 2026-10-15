@@ -140,8 +140,8 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 	}
 
 	// Alloc dispatch by shape: plain EOAs (empty Code AND Storage) are
-	// sorter-keyed with isContract=false; contracts and 7702-delegating EOAs
-	// (23-byte 0xef0100<addr> code) go to WriteContracts.
+	// sorter-keyed with isContract=false; contracts and code-bearing EOAs
+	// go to WriteContracts.
 	if len(cfg.GenesisAccounts) > 0 {
 		allocAccounts := buildAllocAccounts(cfg)
 		var allocEOAs, allocContracts []*entitygen.Account
@@ -191,11 +191,11 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			for i := 0; i < b; i++ {
 				batch[i] = plan.DrawEOA(rng)
 			}
-			// plan.DrawEOA can return 7702-delegating EOAs carrying 23-byte
-			// 0xef0100<addr> code. They go through WriteContracts (Bytecodes
-			// row, CodeHash set in place) and are sorter-keyed with
-			// isContract=true so their HashedAccounts row carries the code
-			// hash the state root commits to.
+			// plan.DrawEOA can return storage-less EOAs carrying code (7702
+			// designators or, under --account-model=mainnet, arbitrary code).
+			// They go through WriteContracts (Bytecodes row, CodeHash set in
+			// place) and are sorter-keyed with isContract=true so their
+			// HashedAccounts row carries the code hash the state root commits to.
 			var plainEOAs, codeEOAs []*entitygen.Account
 			for _, acc := range batch {
 				if len(acc.Code) == 0 {
@@ -211,7 +211,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			}
 			if len(codeEOAs) > 0 {
 				if err := WriteContracts(envs, trieSorter, codeEOAs, 0, cfg.Archive, stats); err != nil {
-					return nil, fmt.Errorf("RunCgo: WriteContracts(7702 EOA): %w", err)
+					return nil, fmt.Errorf("RunCgo: WriteContracts(code EOA): %w", err)
 				}
 			}
 			for _, acc := range plainEOAs {
@@ -221,7 +221,7 @@ func RunCgo(ctx context.Context, cfg generator.Config, opts Options) (*generator
 			}
 			for _, acc := range codeEOAs {
 				if err := putAccountRLP(acc, true); err != nil {
-					return nil, fmt.Errorf("RunCgo: putAccountRLP(7702 EOA): %w", err)
+					return nil, fmt.Errorf("RunCgo: putAccountRLP(code EOA): %w", err)
 				}
 			}
 			accountsCreated += b

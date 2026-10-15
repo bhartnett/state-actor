@@ -85,6 +85,8 @@ type Flags struct {
 	MdbxFill        string `json:"mdbx_fill,omitempty"`
 	// StorageModel is --storage-model ("normal" when empty, i.e. before the flag existed).
 	StorageModel string `json:"storage_model,omitempty"`
+	// AccountModel is --account-model ("normal" when empty, i.e. before the flag existed).
+	AccountModel string `json:"account_model,omitempty"`
 }
 
 // SpecFile references the --spec config used for the run. The raw spec is

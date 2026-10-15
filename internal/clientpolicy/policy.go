@@ -29,6 +29,7 @@ type FlagValues struct {
 	MdbxFillOverridden bool   // --mdbx-fill has at least one Table=fill override
 
 	StorageModel string // --storage-model
+	AccountModel string // --account-model
 }
 
 // ValidateForClient returns nil when every flag in fv is compatible with
@@ -66,9 +67,10 @@ func ValidateForClient(client string, fv FlagValues) error {
 		}
 	}
 
-	// The binary-trie generator writes no giants (the contracts --storage-model=mainnet streams).
-	if fv.BinaryTrie && fv.StorageModel == "mainnet" {
-		return fmt.Errorf("--storage-model=mainnet is not supported with --binary-trie")
+	// The binary-trie generator writes no giants (the contracts --storage-model=mainnet streams)
+	// and the mainnet account model is untested there.
+	if fv.BinaryTrie && (fv.StorageModel == "mainnet" || fv.AccountModel == "mainnet") {
+		return fmt.Errorf("--storage-model=mainnet and --account-model=mainnet are not supported with --binary-trie")
 	}
 
 	// --mdbx-fill-profile / --mdbx-fill — reth-only: every other client

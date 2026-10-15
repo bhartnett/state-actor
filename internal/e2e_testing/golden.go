@@ -35,16 +35,20 @@ func GoldenStateRootCfg(dbPath string) generator.Config {
 }
 
 // GoldenGiantRoot is the state root of GoldenGiantRootCfg on every MPT client.
-var GoldenGiantRoot = common.HexToHash("0x70d81749ec211676c974272ccef4a40d59dcc6c3cf686e726dc884dc9cd3d902")
+var GoldenGiantRoot = common.HexToHash("0xfb4f8deccd5dbb6fb27ca77f972504112e3e653793cb66aea7268a73de44ce7d")
 
-// GoldenGiantRootCfg is GoldenStateRootCfg under --storage-model=mainnet plus
-// one 1M-slot giant, so every writer's giant path is held to one root.
+// GoldenGiantRootCfg is GoldenStateRootCfg under --storage-model=mainnet and
+// --account-model=mainnet plus one 1M-slot giant, so every writer's
+// mainnet-model paths are held to one root.
 func GoldenGiantRootCfg(dbPath string) generator.Config {
 	plan, err := autofill.PlanForBudgetProfile(GoldenTestBudget, autofill.ProfileMainnet, autofill.StorageMainnet)
 	if err != nil {
 		panic("e2e_testing: PlanForBudgetProfile for GoldenTestBudget should never error: " + err.Error())
 	}
 	plan.Giants = 1
+	if plan.AccountModel, err = autofill.ParseAccountModel("mainnet"); err != nil {
+		panic("e2e_testing: ParseAccountModel(mainnet): " + err.Error())
+	}
 	return generator.Config{
 		DBPath:   dbPath,
 		AutoFill: plan,

@@ -227,6 +227,7 @@ func TestManifestFlagsRoundTripAllFields(t *testing.T) {
 		MdbxFillProfile: "migrated",
 		MdbxFill:        "HashedAccounts=0.59",
 		StorageModel:    "mainnet",
+		AccountModel:    "mainnet",
 	}
 	rv := reflect.ValueOf(flags)
 	for i := range rv.NumField() {

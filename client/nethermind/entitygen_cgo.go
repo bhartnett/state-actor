@@ -197,7 +197,7 @@ func writeSyntheticAccounts(
 			}
 			if len(acc.Code) > 0 {
 				if err := codeSink.put(acc.CodeHash[:], acc.Code); err != nil {
-					return common.Hash{}, fmt.Errorf("write EOA delegation code: %w", err)
+					return common.Hash{}, fmt.Errorf("write EOA code: %w", err)
 				}
 				if stats != nil {
 					stats.CodeBytes += uint64(len(acc.Code))

@@ -603,7 +603,7 @@ func mapToSortedSlots(m map[common.Hash]common.Hash) []storageSlot {
 
 // accountDataFrom projects an entitygen.Account into the generator-local
 // accountData shape consumed by the streaming pipeline. Handles both EOAs
-// (Code may be empty, or 23 B for EIP-7702 delegated EOAs) and contracts.
+// (Code may be empty or set, never with storage) and contracts.
 func accountDataFrom(e *entitygen.Account) *accountData {
 	return &accountData{
 		address:  e.Address,
