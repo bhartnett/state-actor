@@ -21,6 +21,7 @@ import (
 	"github.com/holiman/uint256"
 
 	"github.com/ethereum/state-actor/generator"
+	"github.com/ethereum/state-actor/internal/autofill"
 	"github.com/ethereum/state-actor/internal/ethrex"
 	nimbusinternal "github.com/ethereum/state-actor/internal/nimbus"
 	"github.com/ethereum/state-actor/internal/streamsort"
@@ -51,8 +52,8 @@ func phase2Workers() int {
 // writeState builds the whole state from cfg and writes it to db, returning
 // the state root. It is the ethrex writer's pipeline with nimbus rows:
 //
-//  0. Phase 0: spec-entity storage tries stream into AriVtx (per-worker
-//     sinks) under stoIDs pre-allocated in addrHash order.
+//  0. Phase 0: spec-entity and auto-fill giant storage tries stream into
+//     AriVtx (per-worker sinks) under stoIDs pre-allocated in addrHash order.
 //  1. Phase 1: every entity (autofill EOAs, genesis allocs, autofill
 //     contracts — the draw order is the cross-client invariance contract) is
 //     spilled into a streamsort keyed by addrHash.
@@ -92,8 +93,14 @@ func writeState(
 		return nil
 	}
 
+	var giants []*autofill.Giant
+	if cfg.AutoFill != nil {
+		for k := range cfg.AutoFill.Giants {
+			giants = append(giants, cfg.AutoFill.Giant(cfg.Seed, k))
+		}
+	}
 	preStorageByHash := make(map[common.Hash]preStorage)
-	if err := runPhase0Storage(ctx, cfg, db, alloc, preStorageByHash, stats); err != nil {
+	if err := runPhase0Storage(ctx, cfg, db, alloc, giants, preStorageByHash, stats); err != nil {
 		return common.Hash{}, nil, err
 	}
 
@@ -132,7 +139,7 @@ func writeState(
 		if balance == nil {
 			balance = uint256.NewInt(0)
 		}
-		code := cfg.GenesisCode[addr]
+		code := cfg.CodeAt(addr)
 		var slots []entitySlot
 		if storage := cfg.GenesisStorage[addr]; len(storage) > 0 {
 			slots = make([]entitySlot, 0, len(storage))
@@ -157,12 +164,19 @@ func writeState(
 		}
 	}
 
+	// Giants' storage was written in Phase 0; only the account goes through the sorter.
+	for _, g := range giants {
+		if err := sorter.Put(g.AddrHash[:], encodeEntity(g.Nonce, g.Balance, g.Code, nil)); err != nil {
+			return common.Hash{}, nil, fmt.Errorf("nimbus: phase1 giant %s: %w", g.Address.Hex(), err)
+		}
+	}
+
 	// Phase 2.
 	var entitiesQueued int64
 	if plan != nil {
 		entitiesQueued += int64(plan.NumEOAs + plan.NumContracts)
 	}
-	entitiesQueued += int64(len(seenAlloc))
+	entitiesQueued += int64(len(seenAlloc) + len(giants))
 	cfg.Progress.Stage("nimbus: phase 2/2 — building state trie")
 
 	accountBuilder := nimbusinternal.NewBuilder(nimbusinternal.StateRootVID, alloc, vertexSink.vertexSink())

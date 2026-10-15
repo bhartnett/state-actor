@@ -132,3 +132,31 @@ func TestNimbusGoldenStateRoot(t *testing.T) {
 		t.Fatalf("genesis sidecar: %v", err)
 	}
 }
+
+// TestNimbusGoldenStateRootGiants pins the writer to e2e_testing.GoldenGiantRoot
+// (--storage-model=mainnet, --account-model=mainnet, one 1M-slot giant), then
+// runs VerifyState over the giant's Phase-0 storage trie.
+func TestNimbusGoldenStateRootGiants(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "nimbus-golden-giants")
+	if err := os.MkdirAll(dbPath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfg := e2e_testing.GoldenGiantRootCfg(dbPath)
+	var stats *generator.Stats
+	e2e_testing.AssertGoldenGiantRoot(t, "nimbus", cfg,
+		func(ctx context.Context, cfg generator.Config) (*generator.Stats, error) {
+			s, err := clientnimbus.Run(ctx, cfg, clientnimbus.Options{})
+			stats = s
+			return s, err
+		})
+
+	all := readAllCFs(t, clientnimbus.StoreDir(dbPath))
+	vrows, admin := collectVertices(t, all[nimbusinternal.CFAriVtx])
+	rep, err := nimbusinternal.VerifyState(vrows, admin, stats.StateRoot)
+	if err != nil {
+		t.Fatalf("VerifyState: %v", err)
+	}
+	if rep.Accounts != stats.AccountsCreated+stats.ContractsCreated {
+		t.Fatalf("verifier saw %d accounts, writer reported %d EOAs + %d contracts", rep.Accounts, stats.AccountsCreated, stats.ContractsCreated)
+	}
+}

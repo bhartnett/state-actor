@@ -67,7 +67,7 @@ func TestValidateForClient_MdbxFillRethOnly(t *testing.T) {
 	if err := ValidateForClient("reth", FlagValues{MdbxFillOverridden: true}); err != nil {
 		t.Errorf("reth + --mdbx-fill overrides should be allowed: %v", err)
 	}
-	for _, c := range []string{"geth", "nethermind", "besu", "erigon", "ethrex"} {
+	for _, c := range []string{"geth", "nethermind", "besu", "erigon", "ethrex", "nimbus"} {
 		if err := ValidateForClient(c, FlagValues{MdbxFillProfile: "migrated"}); err == nil || !strings.Contains(err.Error(), "only supported with --client=reth") {
 			t.Errorf("%s + --mdbx-fill-profile=migrated should reject with reth-only reason, got %v", c, err)
 		}
@@ -77,7 +77,7 @@ func TestValidateForClient_MdbxFillRethOnly(t *testing.T) {
 	}
 	// "fresh" (the flag default) must be allowed everywhere, same as leaving
 	// MdbxFillProfile unset.
-	for _, c := range []string{"geth", "nethermind", "besu", "reth", "erigon", "ethrex"} {
+	for _, c := range []string{"geth", "nethermind", "besu", "reth", "erigon", "ethrex", "nimbus"} {
 		if err := ValidateForClient(c, FlagValues{MdbxFillProfile: "fresh"}); err != nil {
 			t.Errorf("%s + --mdbx-fill-profile=fresh should be allowed: %v", c, err)
 		}

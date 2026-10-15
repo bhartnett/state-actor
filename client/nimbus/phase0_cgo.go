@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ethereum/state-actor/generator"
+	"github.com/ethereum/state-actor/internal/autofill"
 	"github.com/ethereum/state-actor/internal/ethrex"
 	nimbusinternal "github.com/ethereum/state-actor/internal/nimbus"
 	"github.com/ethereum/state-actor/internal/streamingtrie"
@@ -31,8 +32,8 @@ type phase0Result struct {
 	localBytes uint64
 }
 
-// runPhase0Storage streams every spec entity's storage into its own storage
-// trie. stoIDs are allocated up front in addrHash order so the assignment is
+// runPhase0Storage streams storage tries: PreAlloc entities (drained through
+// streamingtrie) and auto-fill giants (already keccak-sorted). stoIDs are allocated up front in addrHash order so the assignment is
 // deterministic regardless of worker timing; each trie's rows go to the
 // worker's own sink under root stoID, a keyspace disjoint from every other
 // trie. Results land in preStorage (keyed by addrHash) for Stage A.
@@ -41,19 +42,30 @@ func runPhase0Storage(
 	cfg generator.Config,
 	db *nimbusDB,
 	alloc *nimbusinternal.VidAllocator,
+	giants []*autofill.Giant,
 	pre map[common.Hash]preStorage,
 	stats *generator.Stats,
 ) error {
 	type job struct {
-		index    int
+		addr     common.Address
 		addrHash common.Hash
 		stoID    nimbusinternal.VertexID
+		root     func(streamingtrie.HashBuilder, streamingtrie.Sink) (common.Hash, error)
 	}
-	jobs := make([]job, 0, len(cfg.PreAlloc))
+	jobs := make([]job, 0, len(cfg.PreAlloc)+len(giants))
 	for i := range cfg.PreAlloc {
-		if cfg.PreAlloc[i].Storage != nil {
-			jobs = append(jobs, job{index: i, addrHash: crypto.Keccak256Hash(cfg.PreAlloc[i].Address[:])})
+		if pe := &cfg.PreAlloc[i]; pe.Storage != nil {
+			jobs = append(jobs, job{addr: pe.Address, addrHash: crypto.Keccak256Hash(pe.Address[:]),
+				root: func(hb streamingtrie.HashBuilder, sink streamingtrie.Sink) (common.Hash, error) {
+					return streamingtrie.StorageRoot(cfg.DBPath, pe.Storage, hb, sink)
+				}})
 		}
+	}
+	for _, g := range giants {
+		jobs = append(jobs, job{addr: g.Address, addrHash: g.AddrHash,
+			root: func(hb streamingtrie.HashBuilder, sink streamingtrie.Sink) (common.Hash, error) {
+				return streamingtrie.SortedRoot(g.Sorted, hb, sink)
+			}})
 	}
 	if len(jobs) == 0 {
 		return nil
@@ -63,7 +75,7 @@ func runPhase0Storage(
 		jobs[i].stoID = alloc.Alloc(1)
 	}
 
-	cfg.Progress.Stage("nimbus: phase 0 — spec storage")
+	cfg.Progress.Stage("nimbus: phase 0 — streamed storage")
 	slotMeter := cfg.Progress.SlotMeter()
 
 	workers := runtime.NumCPU()
@@ -100,7 +112,6 @@ func runPhase0Storage(
 				if drainCtx.Err() != nil {
 					return
 				}
-				pe := &cfg.PreAlloc[j.index]
 				hb := nimbusinternal.NewStreamHashBuilder(j.stoID, alloc, vsink)
 				var localSlots int
 				var localBytes uint64
@@ -110,12 +121,12 @@ func runPhase0Storage(
 					localBytes += uint64(ethrex.StorageValueRLPLength(value))
 					return nil
 				}
-				root, err := streamingtrie.StorageRoot(cfg.DBPath, pe.Storage, hb, statSink)
+				root, err := j.root(hb, statSink)
 				if err != nil {
-					cancelDrain(fmt.Errorf("nimbus: storage root (PreAlloc %s): %w", pe.Address.Hex(), err))
+					cancelDrain(fmt.Errorf("nimbus: phase 0 storage root %s: %w", j.addr.Hex(), err))
 					return
 				}
-				res := phase0Result{addr: pe.Address, addrHash: j.addrHash, localSlots: localSlots, localBytes: localBytes,
+				res := phase0Result{addr: j.addr, addrHash: j.addrHash, localSlots: localSlots, localBytes: localBytes,
 					pre: preStorage{root: root, stoID: j.stoID, stoHint: hb.StoHint()}}
 				if hb.LeafCount() == 0 {
 					// Every slot was zero: no storage trie, the reserved ID stays an

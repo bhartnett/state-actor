@@ -12,7 +12,11 @@
   against a dump from nimbus's own genesis path and structurally verified by
   `internal/nimbus.VerifyState`. Docker-only (`Dockerfile.nimbus`,
   `cgo_nimbus`); e2e pinned to `statusim/nimbus-eth1:master-2f0ae87`, the
-  first build carrying the current on-disk format.
+  first build carrying the current on-disk format. The writer supports
+  `--storage-model=mainnet` (giants stream in Phase 0),
+  `--account-model=mainnet`, and on-demand `code_pattern` runtimes
+  (`Config.CodeAt`). `TestNimbusGoldenStateRootGiants` pins it to
+  `e2e_testing.GoldenGiantRoot`.
 
 ### Changed
 - **reth: StoragesTrie is written in addrHash order across contracts.** Rows
