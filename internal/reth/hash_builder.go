@@ -13,8 +13,9 @@ import (
 var ErrKeysOutOfOrder = errors.New("HashBuilder: keys must be inserted in strictly ascending nibble order")
 
 // HashBuilder is a streaming Merkle-Patricia trie builder that produces
-// reth-canonical BranchNodeCompact emissions in path order, suitable for
-// MDBX cursor.append into AccountsTrie or StoragesTrie.
+// reth-canonical BranchNodeCompact emissions in post-order (see "Path
+// emission order" below), suitable for persisting into AccountsTrie or
+// StoragesTrie.
 //
 // # Algorithm
 //
@@ -41,38 +42,31 @@ var ErrKeysOutOfOrder = errors.New("HashBuilder: keys must be inserted in strict
 // # Mask semantics (BNC fields)
 //
 //   - state_mask: bit i is set iff slot i has any child (leaf or sub-branch).
-//   - tree_mask: bit i is set iff slot i's child was emitted as its own
-//     BranchNodeCompact row (i.e., a sub-branch we wrote to the trie table).
-//     ONLY set via add_branch() in alloy_trie — see emission semantics below.
-//   - hash_mask: bit i is set iff slot i's child is referenced by its
-//     32-byte hash (RLP ≥ 32 bytes), as opposed to inlined RLP < 32 bytes.
-//     ALSO ONLY set via add_branch() per alloy_trie semantics.
+//   - tree_mask: bit i is set iff slot i's subtree contains a stored branch.
+//   - hash_mask: bit i is set iff slot i's child is a branch node reached
+//     directly (no extension in between).
 //   - Hashes: the popcount(hash_mask) hashes, in slot-index order.
 //   - RootHash: optional; populated only on the final emission (the trie root).
 //
 // # Emission semantics — IMPORTANT
 //
-// A BranchNodeCompact is emitted ONLY when hash_mask | tree_mask != 0, mirroring
-// alloy_trie's behavior. Those masks are populated by add_branch() calls,
-// which simulate pre-existing branch nodes during incremental re-execution.
-//
-// **Pure-leaf insertion (our genesis use case) never triggers add_branch, so
-// no BranchNodeCompact emissions occur during a fresh build.** This matches
-// reth's own genesis behavior — see crates/storage/db-common/src/init.rs's
-// compute_state_root_chunked path. Slice E's writer should treat empty
-// AccountsTrie/StoragesTrie tables as expected for genesis-only state.
-//
-// If you need the trie tables populated for boot-time validation, that's a
-// separate concern from HashBuilder: either accept reth's lazy-recompute
-// behavior, or add an incremental-build pass that calls add_branch (not yet
-// implemented in this Go port; out of scope for Slices A-F).
+// A BranchNodeCompact is emitted iff tree_mask | hash_mask != 0
+// (alloy_trie::HashBuilder's store_branch_node rule): the branch has a
+// direct child branch or a stored branch somewhere below it. Branches whose
+// subtrees hold only leaves and unstored branches get no row; their hashes
+// live in the nearest stored ancestor's Hashes and reth's trie walker
+// recomputes them from HashedAccounts / HashedStorages when needed.
 //
 // # Path emission order
 //
-// When emissions DO happen (incremental re-execution future-work), they're
-// guaranteed lexicographically sorted by StoredNibbles path, matching the
-// order MDBX expects for cursor.append. This is a load-bearing property —
-// Slice E's writer relies on it for sequential MDBX writes.
+// Emissions follow the builder's post-order completion: a branch is only
+// emitted after every emitted descendant in its subtree, and sibling
+// subtrees complete in ascending nibble order. This is NOT a global
+// lexicographic sort by StoredNibbles path — moving from a child's last
+// emission back up to its parent is a "jump" to a smaller key. Callers
+// persist rows with per-key MDBX Put (not cursor.Append's sorted-only fast
+// path); see run_cgo.go's AccountsTrie emit and consumeEntity's StoragesTrie
+// writes.
 //
 // # Memory
 //
@@ -103,45 +97,28 @@ var ErrKeysOutOfOrder = errors.New("HashBuilder: keys must be inserted in strict
 //
 // # Validation
 //
-// HashBuilder is cross-validated against alloy_trie::HashBuilder via
-// internal/reth/testdata/gen/ — both the root hash and the per-emission
-// (path, BranchNodeCompact) sequence must match for a fixed set of fixture
-// inputs. See TestGoldenHashBuilder{Root,Emissions}. Note: emissions tests
-// are vacuously correct for the current fixture set (pure-leaf insertion;
-// no add_branch); the emission path is correct by structural inspection
-// against the Rust reference but exercised end-to-end only in incremental
-// flows we haven't yet built fixtures for.
+// HashBuilder's root is cross-validated against alloy_trie::HashBuilder via
+// internal/reth/testdata/gen/ (TestGoldenHashBuilderRoot). The emission rule
+// is pinned by hash_builder_emissions_test.go against an independent
+// recomputation of the stored-branch set.
 //
 // # References
 //
 //   - Spec §6.5: docs/superpowers/specs/2026-04-29-reth-direct-mdbx-design.md
 //   - Rust ref: ~/.cargo/registry/.../alloy-trie-0.9.5/src/hash_builder/
 //
-// NodeEmitter is called by HashBuilder once for each branch node that
-// completes during streaming. The path is the trie nibble path from root to
-// the branch (using StoredNibbles' 65-byte legacy form: nibbles[64] ||
-// length[1]), and node is the reth-canonical BranchNodeCompact.
-//
-// Emissions happen in path-lexicographic order, so the consumer can write to
-// AccountsTrie/StoragesTrie via cursor.append (sequential MDBX writes).
+// NodeEmitter receives each stored branch as HashBuilder completes it, in
+// the order described under "Path emission order" on HashBuilder. The path
+// is the branch's nibble path in StoredNibbles' 65-byte legacy form.
 //
 // A non-nil error from NodeEmitter MUST be treated as fatal by the caller —
 // HashBuilder logs it but continues, so a swallowed error results in a root
 // hash that is inconsistent with whatever was actually persisted to disk.
 type NodeEmitter func(path StoredNibbles, node BranchNodeCompact) error
 
-// HashBuilder implements the algorithm described on NodeEmitter above.
+// HashBuilder implements the algorithm described in its doc above.
 type HashBuilder struct {
 	emit NodeEmitter
-
-	// fullEmissions, when true, emits a BranchNodeCompact for every branch
-	// whose RLP encoding is ≥ 32 bytes (i.e., the on-disk hash-referenced
-	// branches). This is the state-actor genesis path: synthesise the trie
-	// tables so reth's payload builder doesn't have to walk HashedAccounts
-	// / HashedStorages from scratch on every block. Default (false) matches
-	// alloy_trie::HashBuilder — emit only when hash_mask | tree_mask != 0
-	// (incremental re-execution semantics).
-	fullEmissions bool
 
 	// key is the nibble-form of the most recently added leaf key (nil if none yet).
 	key []byte
@@ -164,22 +141,11 @@ type HashBuilder struct {
 }
 
 // NewHashBuilder returns a HashBuilder that emits completed branch nodes via
-// emit using alloy_trie's incremental-update semantics — i.e., emission only
-// fires when hash_mask | tree_mask != 0. Pure-leaf builds produce zero
-// emissions. Pass a no-op emit (`func(StoredNibbles, BranchNodeCompact) error
-// { return nil }`) for tests that only care about the root hash.
+// emit (see "Emission semantics" above). Pass a no-op emit
+// (`func(StoredNibbles, BranchNodeCompact) error { return nil }`) for callers
+// that only care about the root hash.
 func NewHashBuilder(emit NodeEmitter) *HashBuilder {
 	return &HashBuilder{emit: emit}
-}
-
-// NewHashBuilderFullEmissions emits a BranchNodeCompact for every branch
-// whose RLP encoding is ≥ 32 bytes, regardless of hash_mask / tree_mask
-// state. Required when populating reth's AccountsTrie / StoragesTrie at
-// genesis so reth's TrieWalker finds the cached branch rows; otherwise
-// payload-build falls back to a linear HashedAccounts walk per block.
-// The emission set is a strict superset of alloy_trie's add_branch set.
-func NewHashBuilderFullEmissions(emit NodeEmitter) *HashBuilder {
-	return &HashBuilder{emit: emit, fullEmissions: true}
 }
 
 // AddLeaf inserts a (keyNibbles, valueRLP) pair into the trie under
@@ -326,32 +292,8 @@ func (b *HashBuilder) update(succeeding []byte) {
 
 // pushBranchNode pops the children for the branch at depth `length` off the
 // stack, encodes the branch RLP, pushes the result, and emits a
-// BranchNodeCompact when this branch becomes its own on-disk row.
-//
-// Emission rule: emit when ANY of the following holds:
-//
-//   - This branch's RLP encoding is ≥ 32 bytes (it is referenced by hash;
-//     reth's AccountsTrie / StoragesTrie tables hold one row per such
-//     branch, keyed by its nibble path).
-//   - At least one child of this branch was itself emitted (tree_mask != 0),
-//     so reth's TrieWalker following the parent will look for this row to
-//     navigate into the subtree.
-//   - At least one child is referenced by hash (hash_mask != 0), same
-//     reasoning — the parent's row must exist for the walker to resolve
-//     hashed children correctly.
-//
-// alloy_trie::HashBuilder only triggers emission via add_branch() (the
-// incremental-update path). At genesis we are doing a pure-leaf build
-// with no pre-existing branches, so add_branch is never called and
-// alloy_trie itself would emit zero rows. State-actor synthesises the
-// trie tables here so reth's payload-builder state-root computation can
-// use them as branch-node cache and avoid a full HashedAccounts /
-// HashedStorages walk on every block (which would exceed MDBX's 300 s
-// read-txn lifetime on a 100+ GB DB).
-//
-// Inlined branches (RLP < 32 bytes) never appear in reth's on-disk trie
-// tables — they're embedded into their parent's RLP. We skip emission
-// for those.
+// BranchNodeCompact iff tree_mask | hash_mask != 0 (alloy_trie's
+// store_branch_node rule; see "Emission semantics" on HashBuilder).
 func (b *HashBuilder) pushBranchNode(current []byte, length int) {
 	stateMask := b.stateMasks[length]
 	hashMask := uint16(0)
@@ -372,52 +314,27 @@ func (b *HashBuilder) pushBranchNode(current []byte, length int) {
 	branchRLP := encodeBranchNode(stateMask, children)
 	rlpNode := rlpNodeFromRLP(branchRLP)
 
-	// Update parent's hash_mask if we're a hashed node.
+	// Every completed branch marks itself in the parent's hash_mask (alloy's
+	// store_branch_node does the same); updateMasks clears the bit again if
+	// this branch ends up behind an extension.
 	if length > 0 {
 		parentIdx := length - 1
 		b.hashMasks[parentIdx] |= nibbleMask(current[parentIdx])
 	}
 
-	// A branch is hashed (gets its own on-disk row) iff its RLP encoding is
-	// ≥ 32 bytes, which is exactly what rlpNodeFromRLP signals by returning
-	// the 33-byte (0xa0 || hash) form.
-	isHashed := len(rlpNode) == 33 && rlpNode[0] == 0xa0
-
-	// Two-gate decision, mirroring alloy_trie::HashBuilder::store_branch_node
-	// (hash_builder/mod.rs:429-457):
-	//
-	//   - storeInDbTrie: Rust's `store_in_db_trie` — true iff this branch
-	//     has child rows or hashed children of its own. This is the gate
-	//     that controls the PARENT's tree_mask write below; it's also the
-	//     condition under which alloy_trie's structural invariant
-	//     `tree_mask ⊆ state_mask` holds by construction (the prior
-	//     update()-iteration that set state_masks[parentIdx] with this
-	//     same nibble also serves as the precondition for setting
-	//     tree_masks[parentIdx]). Pure-leaf builds never satisfy this gate
-	//     (tree/hash masks stay 0), so the parent-tree-mask write never
-	//     fires — invariant holds vacuously.
-	//
-	//   - shouldEmit: state-actor's genesis full-emissions opt-in. When
-	//     fullEmissions is set we ALSO emit any hashed branch (RLP ≥ 32)
-	//     so the on-disk AccountsTrie/StoragesTrie tables are populated
-	//     for reth's payload-builder cache. This is purely additive on
-	//     the emission count — it MUST NOT widen the parent-mask write
-	//     gate, otherwise tree_mask bits leak across iterations and
-	//     violate the invariant.
+	// storeInDbTrie: this branch has a child branch (treeMask) or a hashed
+	// child (hashMask), i.e. tree_mask | hash_mask != 0 — alloy_trie's
+	// store_branch_node rule. Gates both the parent's tree_mask write (what
+	// keeps tree_mask ⊆ state_mask invariant in emitted rows) and whether
+	// this branch itself gets a row.
 	storeInDbTrie := treeMask != 0 || hashMask != 0
-	shouldEmit := storeInDbTrie || (b.fullEmissions && isHashed)
 
 	if storeInDbTrie {
-		// Parent-tree-mask write — gated on Rust's structural condition
-		// only. This is what keeps tree_mask ⊆ state_mask invariant in
-		// emitted BranchNodeCompact rows.
 		if length > 0 {
 			parentIdx := length - 1
 			b.treeMasks[parentIdx] |= nibbleMask(current[parentIdx])
 		}
-	}
 
-	if shouldEmit {
 		// Collect the hashes for hashed children.
 		var hashes []common.Hash
 		childIdx := 0
@@ -517,8 +434,8 @@ func (b *HashBuilder) computeRootFromRlpNode(node []byte) common.Hash {
 // same bit set (`b.stateMasks[lenFrom-1] & flag != 0`). Mirrors the precise
 // invariant that holds in alloy_trie by construction: a tree-mask bit only
 // makes sense at a slot where the parent branch actually has a child. The
-// gate prevents stale tree-mask bits — set by deeper-branch processing under
-// fullEmissions opt-in — from leaking into shallower-depth tree_masks
+// gate prevents stale tree-mask bits set by deeper-branch processing from
+// leaking into shallower-depth tree_masks
 // without a matching state_mask presence, which would violate the
 // `tree_mask ⊆ state_mask` invariant that reth's `BranchNodeCompact::new`
 // asserts (alloy-trie/src/nodes/branch.rs:298).

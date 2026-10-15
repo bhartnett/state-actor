@@ -29,7 +29,7 @@ import (
 // erigonImageRef is the image the boot phase runs as the erigon daemon.
 // Defaults to the cgo-suite builder image this test runs inside: it ships
 // the locally-built erigon at /usr/local/bin/erigon — the exact pinned
-// commit (14273f79a6) state-actor's commitment vendor depends on. Override
+// commit (546790a6a7) state-actor's commitment vendor depends on. Override
 // with ERIGON_IMAGE for local runs against a different tag.
 func erigonImageRef() string {
 	if v := os.Getenv("ERIGON_IMAGE"); v != "" {

@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/ethereum/state-actor/generator"
+	"github.com/ethereum/state-actor/internal/autofill"
 	ethrexinternal "github.com/ethereum/state-actor/internal/ethrex"
 	"github.com/ethereum/state-actor/internal/streamingtrie"
 )
@@ -32,7 +33,8 @@ type phase0Result struct {
 	localBytes uint64
 }
 
-// runPhase0Storage drains each PreAlloc entity's storage iterator in parallel.
+// runPhase0Storage streams storage tries in parallel: PreAlloc entities
+// (drained through streamingtrie) and auto-fill giants (already keccak-sorted).
 // Each worker owns its own pair of batchSinks (storage_trie_nodes and
 // storage_flatkeyvalue) — the per-entity addrHash prefix makes concurrent
 // grocksdb.Write calls safe because every worker writes to a disjoint
@@ -45,17 +47,28 @@ func runPhase0Storage(
 	ctx context.Context,
 	cfg generator.Config,
 	db *ethrexDB,
+	giants []*autofill.Giant,
 	preAllocStorageRoots map[common.Hash]common.Hash,
 	stats *generator.Stats,
 ) error {
-	// Collect indices of PreAlloc entries that have storage to drain.
-	indices := make([]int, 0, len(cfg.PreAlloc))
+	type streamed struct {
+		addr common.Address
+		root func(streamingtrie.HashBuilder, streamingtrie.Sink) (common.Hash, error)
+	}
+	var items []streamed
 	for i := range cfg.PreAlloc {
-		if cfg.PreAlloc[i].Storage != nil {
-			indices = append(indices, i)
+		if pe := &cfg.PreAlloc[i]; pe.Storage != nil {
+			items = append(items, streamed{pe.Address, func(hb streamingtrie.HashBuilder, sink streamingtrie.Sink) (common.Hash, error) {
+				return streamingtrie.StorageRoot(cfg.DBPath, pe.Storage, hb, sink)
+			}})
 		}
 	}
-	if len(indices) == 0 {
+	for _, g := range giants {
+		items = append(items, streamed{g.Address, func(hb streamingtrie.HashBuilder, sink streamingtrie.Sink) (common.Hash, error) {
+			return streamingtrie.SortedRoot(g.Sorted, hb, sink)
+		}})
+	}
+	if len(items) == 0 {
 		return nil
 	}
 
@@ -63,7 +76,7 @@ func runPhase0Storage(
 	// for hours on bloat specs. The count-only slot heartbeat funnels every
 	// worker's per-slot count through one SlotMeter; each worker holds its own
 	// SlotWorker so the hot per-slot path stays cheap (one non-atomic add + mask).
-	cfg.Progress.Stage("ethrex: phase 0 — spec storage")
+	cfg.Progress.Stage("ethrex: phase 0 — streamed storage")
 	slotMeter := cfg.Progress.SlotMeter()
 
 	workers := runtime.NumCPU()
@@ -73,8 +86,8 @@ func runPhase0Storage(
 	if workers > maxPhase0Workers {
 		workers = maxPhase0Workers
 	}
-	if workers > len(indices) {
-		workers = len(indices)
+	if workers > len(items) {
+		workers = len(items)
 	}
 
 	drainCtx, cancelDrain := context.WithCancelCause(ctx)
@@ -128,8 +141,8 @@ func runPhase0Storage(
 				if drainCtx.Err() != nil {
 					return
 				}
-				pe := &cfg.PreAlloc[i]
-				addr := pe.Address
+				it := items[i]
+				addr := it.addr
 				addrHash := crypto.Keccak256Hash(addr[:])
 
 				// Storage rows arrive address-prefixed (via PrefixedSink), so the
@@ -152,9 +165,9 @@ func runPhase0Storage(
 					return nil
 				}
 
-				root, err := streamingtrie.StorageRoot(cfg.DBPath, pe.Storage, hb, statSink)
+				root, err := it.root(hb, statSink)
 				if err != nil {
-					cancelDrain(fmt.Errorf("ethrex: storage root (PreAlloc %s): %w", addr.Hex(), err))
+					cancelDrain(fmt.Errorf("ethrex: phase 0 storage root %s: %w", addr.Hex(), err))
 					return
 				}
 
@@ -176,7 +189,7 @@ func runPhase0Storage(
 	// Feed entity indices to workers.
 	go func() {
 		defer close(drainCh)
-		for _, i := range indices {
+		for i := range items {
 			select {
 			case drainCh <- i:
 			case <-drainCtx.Done():

@@ -1,5 +1,5 @@
-// Vendored from github.com/erigontech/erigon execution/commitment/hex_patricia_hashed.go @ 14273f79a6 (production pin).
-// Modifications: package commitment -> hph; build tag; nibbles import rewrite; stripped 5 funcs (GenerateWitness, toWitnessTrie, witnessCreateAccountNode, witnessComputeCellHashWithStorage, PrintGrid — debug-only) + 4 imports (commitment/trie, witness, common/crypto, types/accounts); R2 dead-code strip: SetState/state.Decode/cell.Decode/HexTrie* readers, feedBranchHashesToKeccak, Grid, DomainPutter/CommitmentWrite (+stateifs), collapse-tracer cluster
+// Vendored from github.com/erigontech/erigon execution/commitment/hex_patricia_hashed.go @ 14273f79a6 (prior pin; Golden A checks it against the current pin's engine).
+// Modifications: package commitment -> hph; build tag; nibbles import rewrite; stripped 5 funcs (GenerateWitness, toWitnessTrie, witnessCreateAccountNode, witnessComputeCellHashWithStorage, PrintGrid — debug-only) + 4 imports (commitment/trie, witness, common/crypto, types/accounts); R2 dead-code strip: SetState/state.Decode/cell.Decode/HexTrie* readers, feedBranchHashesToKeccak, Grid, DomainPutter/CommitmentWrite (+stateifs), collapse-tracer cluster; empty.RootHash[:] for the Hash.Bytes the current pin dropped
 //
 //go:build cgo_erigon_commitment
 
@@ -179,7 +179,7 @@ func (f loadFlags) addFlag(loadFlags loadFlags) loadFlags {
 }
 
 var (
-	emptyRootHashBytes = empty.RootHash.Bytes()
+	emptyRootHashBytes = empty.RootHash[:]
 )
 
 func (cell *cell) hashAccKey(keccak keccak.KeccakState, depth int16, hashBuf []byte) error {

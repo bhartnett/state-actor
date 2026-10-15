@@ -28,3 +28,12 @@ func TestNethGoldenStateRoot(t *testing.T) {
 			return Run(ctx, cfg, Options{})
 		})
 }
+
+func TestNethGoldenStateRootGiants(t *testing.T) {
+	cfg := e2e_testing.GoldenGiantRootCfg(t.TempDir())
+	cfg.TrieMode = generator.TrieModeMPT
+	e2e_testing.AssertGoldenGiantRoot(t, "nethermind", cfg,
+		func(ctx context.Context, cfg generator.Config) (*generator.Stats, error) {
+			return Run(ctx, cfg, Options{})
+		})
+}

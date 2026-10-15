@@ -2,24 +2,17 @@ package snap
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
-	"time"
-
-	"github.com/spaolacci/murmur3"
 
 	"github.com/ethereum/state-actor/internal/erigon"
-	"github.com/ethereum/state-actor/internal/erigon/btindex"
-	"github.com/ethereum/state-actor/internal/erigon/existence"
-	"github.com/ethereum/state-actor/internal/erigon/recsplit"
-	"github.com/ethereum/state-actor/internal/erigon/seg"
 )
 
-// Writer composes seg + btindex + existence into Erigon's per-domain
-// snapshot file set. Construct via NewWriter; emit a domain via
-// WriteDomain; finalize via Close.
+// Writer lays out an Erigon datadir's snapshot directory (salt,
+// erigondb.toml, domain dir) and hands each domain to Settings.Files.
+// Construct via NewWriter; emit a domain via WriteDomain; finalize via
+// Close.
 //
 // Re-creating a Writer over an existing datadir is supported: NewWriter
 // verifies salt/erigondb invariants match what's already on disk and
@@ -38,31 +31,20 @@ type Writer struct {
 // Defaults applied to s if zero:
 //   - StepSize:          erigon.StepSize (390_625)
 //   - StepsInFrozenFile: erigon.StepsInFrozenFile (256)
-//   - SnapshotVersion:   erigon.SnapshotFormatVersion ("v1.0")
 //   - Salt:              DeriveSaltFromSeed(s.Seed) if both Salt==0
 //     and no salt-state.txt exists yet on disk
-//   - Accessors[d]:      DefaultAccessorMask(d) per Verifier B's
-//     correction (per-domain mix)
 func NewWriter(datadir string, s Settings) (*Writer, error) {
 	if datadir == "" {
 		return nil, errors.New("snap.NewWriter: datadir is required")
+	}
+	if s.Files == nil {
+		return nil, errors.New("snap.NewWriter: Settings.Files is required (internal/erigon/erigonfiles, cgo_erigon_commitment build)")
 	}
 	if s.StepSize == 0 {
 		s.StepSize = erigon.StepSize
 	}
 	if s.StepsInFrozenFile == 0 {
 		s.StepsInFrozenFile = erigon.StepsInFrozenFile
-	}
-	if s.SnapshotVersion == "" {
-		s.SnapshotVersion = erigon.SnapshotFormatVersion
-	}
-	if s.Accessors == nil {
-		s.Accessors = make(map[Domain]AccessorMask, 4)
-	}
-	for _, d := range []Domain{DomainAccounts, DomainStorage, DomainCode, DomainCommitment} {
-		if _, ok := s.Accessors[d]; !ok {
-			s.Accessors[d] = DefaultAccessorMask(d)
-		}
 	}
 
 	if err := EnsureSnapshotLayout(datadir); err != nil {
@@ -134,25 +116,9 @@ func contains(s, sub string) bool {
 // <datadir>/snapshots/salt-state.txt.
 func (w *Writer) Salt() uint32 { return w.settings.Salt }
 
-// WriteDomain emits the per-domain file set (.kv data + accessors) for
-// (d, r). entries MUST yield ascending keys and MUST be repeatable —
-// pass 1 drives it twice (seg.CompressFromSource count + encode);
-// behaviour is undefined otherwise. The .kv is written first, then
-// re-iterated via seg.Decompressor to feed the accessor builders —
-// matching the two-pass pattern from Erigon's
-// simple_accessor_builder.go:194-216 (Verifier B's Correction 2).
-//
-// keyCount is required up-front: the bloom-filter sizing
-// (existence.NewFilterBuilder) and B+tree node count depend on it.
-// If the caller doesn't know the count statically, materialize into a
-// slice first.
-//
-// Output paths (under <datadir>/snapshots/domain/):
-//
-//	v1.0-accounts.0-256.kv
-//	v1.0-accounts.0-256.bt    (AccessorBTree)
-//	v1.0-accounts.0-256.kvi   (AccessorHashMap)   — commitment only
-//	v1.0-accounts.0-256.kvei  (AccessorExistence) — all domains by default
+// WriteDomain emits the per-domain file set for (d, r) under
+// <datadir>/snapshots/domain/ through Settings.Files. entries MUST yield
+// ascending keys; keyCount is how many it yields.
 func (w *Writer) WriteDomain(ctx context.Context, d Domain, r StepRange, keyCount uint64, entries func(yield func(DomainEntry) bool)) error {
 	if w.closed {
 		return errors.New("snap.Writer: Closed")
@@ -160,184 +126,12 @@ func (w *Writer) WriteDomain(ctx context.Context, d Domain, r StepRange, keyCoun
 	if r.From >= r.To {
 		return fmt.Errorf("snap.WriteDomain: invalid StepRange [%d, %d)", r.From, r.To)
 	}
-
 	domainDir := DomainDir(w.datadir)
-	tmpDir := domainDir // seg.Compressor writes its own .tmp files under tmpDir
-	dataPath := BuildDataFilename(domainDir, w.settings.SnapshotVersion, d, r)
-
-	// Pass 1: write the .kv straight from the (repeatable) entries source —
-	// CompressFromSource drives it twice (count, then encode), skipping the
-	// .idt intermediate that used to cost a full extra write+read of the
-	// domain (up to ~44 GB) and the matching transient disk peak.
-	timing := os.Getenv("STATE_ACTOR_SNAP_TIMING") != ""
-	pass1Start := time.Now()
-	cfg := seg.DefaultConfig()
-	comp, err := seg.NewCompressor(dataPath, tmpDir, cfg)
-	if err != nil {
-		return fmt.Errorf("snap.WriteDomain: seg.NewCompressor: %w", err)
+	// The compressor and accessor builders write their temp files under the domain dir, on the
+	// same filesystem as the output.
+	if err := w.settings.Files.WriteDomain(ctx, domainDir, domainDir, d, r, keyCount, w.settings.Salt, entries); err != nil {
+		return fmt.Errorf("snap.WriteDomain: %w", err)
 	}
-	src := seg.WordSource(func(yield func(word []byte) bool) {
-		entries(func(e DomainEntry) bool {
-			return yield(e.Key) && yield(e.Value)
-		})
-	})
-	if err := comp.CompressFromSource(src); err != nil {
-		_ = comp.Close()
-		return fmt.Errorf("snap.WriteDomain: seg.CompressFromSource: %w", err)
-	}
-	if err := comp.Close(); err != nil {
-		return fmt.Errorf("snap.WriteDomain: seg.Close: %w", err)
-	}
-	if timing {
-		fmt.Printf("snap: timing %v pass-1 (count+encode) %s\n", d, time.Since(pass1Start).Round(time.Second))
-	}
-
-	// Pass 2: re-open the .kv, iterate (key, val, keyOff, valOff), feed
-	// the accessor builders.
-	mask := w.settings.Accessors[d]
-	dec, err := seg.NewDecompressor(dataPath)
-	if err != nil {
-		return fmt.Errorf("snap.WriteDomain: seg.NewDecompressor: %w", err)
-	}
-	defer dec.Close()
-	// A pass-2 failure would otherwise leave a final-named .kv with no
-	// sidecars — remove it so an aborted build can't pass for a complete
-	// domain on a re-run.
-	pass2OK := false
-	defer func() {
-		if !pass2OK {
-			_ = os.Remove(dataPath)
-		}
-	}()
-
-	var bt *btindex.Writer
-	if mask.Has(AccessorBTree) {
-		btPath := BuildBTreeFilename(domainDir, w.settings.SnapshotVersion, d, r)
-		bt, err = btindex.New(btindex.Args{
-			KeyCount:  int(keyCount),
-			TmpDir:    tmpDir,
-			IndexFile: btPath,
-		})
-		if err != nil {
-			return fmt.Errorf("snap.WriteDomain: btindex.New: %w", err)
-		}
-		// Release the offsets spill file on every exit path. Close is
-		// idempotent, so the explicit Close after a successful Build is a
-		// no-op; this defer is what prevents a multi-GB spill-file leak
-		// when the iterate loop or Build below returns an error.
-		defer bt.Close()
-	}
-
-	var exist *existence.FilterBuilder
-	if mask.Has(AccessorExistence) {
-		exPath := BuildExistenceFilename(domainDir, w.settings.SnapshotVersion, d, r)
-		exist, err = existence.NewFilterBuilder(keyCount, exPath, false)
-		if err != nil {
-			return fmt.Errorf("snap.WriteDomain: existence.NewFilterBuilder: %w", err)
-		}
-	}
-
-	// AccessorHashMap (.kvi via recsplit) — commitment-domain default.
-	// Recsplit may need to retry on hash collisions; for v1 we surface
-	// the collision as an error rather than auto-retry (caller can
-	// bump Settings.Salt and re-invoke).
-	var hashm *recsplit.Writer
-	if mask.Has(AccessorHashMap) {
-		hmPath := BuildHashMapFilename(domainDir, w.settings.SnapshotVersion, d, r)
-		saltCopy := w.settings.Salt // recsplit needs a *uint32 to mutate on collision
-		hashm, err = recsplit.New(recsplit.Args{
-			KeyCount:   int(keyCount),
-			BucketSize: 100,
-			Salt:       &saltCopy,
-			LeafSize:   8,
-			TmpDir:     tmpDir,
-			IndexFile:  hmPath,
-			Workers:    w.settings.RecSplitWorkers,
-		})
-		if err != nil {
-			return fmt.Errorf("snap.WriteDomain: recsplit.New: %w", err)
-		}
-		// recsplit.New opens its bucket streamsort (a Pebble dir) eagerly;
-		// this defer removes it on every exit path. Idempotent with the
-		// explicit Close after a successful Build.
-		defer hashm.Close()
-	}
-
-	// Salt-prehash for the existence filter (per Verifier B's note in
-	// the plan: caller is responsible for the salt pre-hash):
-	//   hash := murmur3.Sum128WithSeed(key, salt)
-	// We use the first uint64 of the 128-bit hash because the existence
-	// filter's AddHash signature accepts a uint64. Erigon's writer uses
-	// the same lower 64 bits.
-	saltBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(saltBytes, w.settings.Salt)
-
-	pass2Start := time.Now()
-	for entry, err := range dec.Iterate(ctx) {
-		if err != nil {
-			return fmt.Errorf("snap.WriteDomain: decompressor iterate: %w", err)
-		}
-		if bt != nil {
-			// MUST be KeyOffset, not ValueOffset: upstream's BtIndex.dataLookup
-			// (db/datastruct/btindex/btree_index.go:531) does
-			// `g.Reset(offset); g.Next(nil) /*=key*/; g.Next(nil) /*=value*/`
-			// — so `offset` must point at the key's length-prefix, NOT at
-			// the value. Upstream's reference builder confirms (same file
-			// line 432): `pos` is captured BEFORE `kv.Next(key[:0])`.
-			// Using ValueOffset here positions the Huffman cursor mid-entry
-			// and walks dataP past EOF on the first system-contract lookup
-			// of block 0 (manifested as
-			// `panic: index out of range [N] with length N` in
-			// exec3_serial.go:349).
-			if err := bt.AddKey(entry.Key, entry.KeyOffset); err != nil {
-				return fmt.Errorf("snap.WriteDomain: btindex.AddKey: %w", err)
-			}
-		}
-		if hashm != nil {
-			if err := hashm.AddKey(entry.Key, entry.KeyOffset); err != nil {
-				return fmt.Errorf("snap.WriteDomain: recsplit.AddKey: %w", err)
-			}
-		}
-		if exist != nil {
-			lo, _ := murmur3.Sum128WithSeed(entry.Key, w.settings.Salt)
-			if err := exist.AddHash(lo); err != nil {
-				return fmt.Errorf("snap.WriteDomain: existence.AddHash: %w", err)
-			}
-		}
-	}
-
-	if timing {
-		fmt.Printf("snap: timing %v pass-2 (accessor feed) %s\n", d, time.Since(pass2Start).Round(time.Second))
-	}
-	buildStart := time.Now()
-	if bt != nil {
-		if err := bt.Build(ctx); err != nil {
-			return fmt.Errorf("snap.WriteDomain: btindex.Build: %w", err)
-		}
-		if err := bt.Close(); err != nil {
-			return fmt.Errorf("snap.WriteDomain: btindex.Close: %w", err)
-		}
-	}
-	if hashm != nil {
-		if err := hashm.Build(ctx); err != nil {
-			if hashm.Collision() {
-				return fmt.Errorf("snap.WriteDomain: recsplit hash collision — bump Settings.Salt and retry: %w", err)
-			}
-			return fmt.Errorf("snap.WriteDomain: recsplit.Build: %w", err)
-		}
-		if err := hashm.Close(); err != nil {
-			return fmt.Errorf("snap.WriteDomain: recsplit.Close: %w", err)
-		}
-	}
-	if exist != nil {
-		if err := exist.Build(); err != nil {
-			return fmt.Errorf("snap.WriteDomain: existence.Build: %w", err)
-		}
-	}
-	if timing {
-		fmt.Printf("snap: timing %v accessor Build %s\n", d, time.Since(buildStart).Round(time.Second))
-	}
-	pass2OK = true
 	return nil
 }
 

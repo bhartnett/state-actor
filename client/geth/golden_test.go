@@ -18,3 +18,13 @@ func TestGethGoldenStateRoot(t *testing.T) {
 			return Populate(ctx, cfg, Options{})
 		})
 }
+
+func TestGethGoldenStateRootGiants(t *testing.T) {
+	cfg := e2e_testing.GoldenGiantRootCfg(filepath.Join(t.TempDir(), "geth", "chaindata"))
+	cfg.TrieMode = generator.TrieModeMPT
+	cfg.WriteTrieNodes = true
+	e2e_testing.AssertGoldenGiantRoot(t, "geth", cfg,
+		func(ctx context.Context, cfg generator.Config) (*generator.Stats, error) {
+			return Populate(ctx, cfg, Options{})
+		})
+}

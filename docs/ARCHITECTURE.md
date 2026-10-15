@@ -237,7 +237,8 @@ configurable worker pool / batch size at the generator level.
   commitment lib. Runs stock upstream erigon as a CLI (`erigon init`,
   then the daemon — no upstream patch). Bulk state (accounts / storage
   / code / commitment) streams into Erigon v3 flat snapshot `.kv` files
-  (plus `.bt` / `.kvi` / `.kvei` accessors) via `internal/erigon`; the
+  and their accessors, each written by the pinned Erigon's own writers
+  (`internal/erigon/erigonfiles`) at that Erigon's file versions; the
   MDBX stays minimal (genesis header with a patched `stateRoot` + chain
   config). The "fat genesis" construction (`MaxTxNum[0]=StepSize-1`,
   genesis `BodyForStorage.TxCount=StepSize` + `Sequence[EthTx]=StepSize`
@@ -306,6 +307,21 @@ size is a truncated normal in `[1 KiB, 100 MiB]` whose mean is budget-derived
 — typically ~35 KiB at any target scale. EOAs randomize balance (90 %
 non-zero), nonce (always non-zero), and EIP-7702 delegation (2 %, targets
 from a fixed 256-address pool) independently.
+
+The truncated-normal storage sizing above is the `normal` storage model
+(default). `--storage-model=mainnet` instead draws each contract's slot
+count and value length from calibrated mainnet distributions in
+[`internal/autofill/mainnet_storage_table.go`](../internal/autofill/mainnet_storage_table.go).
+Contracts at or above 1M slots are giants
+([`internal/autofill/giants.go`](../internal/autofill/giants.go)): their slots
+are generated on demand and streamed in keccak order (`Giant.Sorted`, fed to
+`streamingtrie.SortedRoot` in each writer's Phase 0 pool; erigon encodes them
+in chunks on its worker pool), never materialized or sorted through a temp store.
+
+`--account-model=mainnet` replaces the EOA draw with a census of mainnet
+accounts ([`internal/autofill/mainnet_account_table.go`](../internal/autofill/mainnet_account_table.go)):
+account class, nonce and balance size, and storage-less contract code; storage
+accounts and giants take the census's nonce/balance shape.
 
 Spec-loaded entities (`--spec`) are separate: their distribution comes
 from the YAML schema (per-entity `approximate_size_bytes` resolved via
@@ -379,7 +395,8 @@ Today's client adapters:
   build tag.
 - `client/erigon/` — cgo + mdbx-go writer producing Erigon v3 flat
   snapshot `.kv` files (accounts / storage / code / commitment) plus
-  their `.bt` / `.kvi` / `.kvei` accessors (built via `internal/erigon/`),
+  their accessors, written by the pinned Erigon's own code
+  (`internal/erigon/erigonfiles`),
   alongside a minimal MDBX (genesis header with a patched `stateRoot` +
   chain config) laid down by the pinned `erigon init` CLI. The "fat
   genesis" construction (`MaxTxNum[0]=StepSize-1`, genesis
@@ -438,7 +455,7 @@ state-actor/
 │   ├── reth/                        # Reth-side codec (MDBX wire format)
 │   ├── neth/                        # Nethermind-side helpers
 │   ├── ethrex/                      # ethrex path-keyed trie codec + RocksDB helpers
-│   ├── erigon/                      # erigon v3 snapshot codec (seg/btindex/recsplit) + helpers
+│   ├── erigon/                      # erigon snapshot layout (snap), Erigon-backed file writer (erigonfiles) + helpers
 │   ├── nimbus/                      # nimbus Aristo vertex codec, vertex-ID scheme, Kvt keys, verifier
 │   ├── engineapi/                   # Mock CL engine-API driver (besu / nethermind boot)
 │   ├── e2e_testing/                 # Shared per-client TestE2ESuite phases + checks + RPC oracle

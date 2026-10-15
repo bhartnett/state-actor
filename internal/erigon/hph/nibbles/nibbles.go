@@ -1,4 +1,4 @@
-// Vendored from github.com/erigontech/erigon execution/commitment/nibbles/nibbles.go @ 14273f79a6 (production pin).
+// Vendored from github.com/erigontech/erigon execution/commitment/nibbles/nibbles.go @ 14273f79a6 (prior pin; Golden A checks it against the current pin's engine).
 // Modifications: build tag; R2 strip: CompactToHex/KeybytesToHex/HexToKeybytes (unused post-trim).
 //
 //go:build cgo_erigon_commitment

@@ -136,28 +136,51 @@ func (d *Drained) IterateRoot(hb HashBuilder, sink Sink) (common.Hash, error) {
 		copy(keyHash[:], keyHashB)
 		copy(rawKey[:], combinedB[0:32])
 		copy(value[:], combinedB[32:64])
-
-		if sink != nil {
-			if err := sink(keyHash, rawKey, value); err != nil {
-				return fmt.Errorf("streamingtrie: sink: %w", err)
-			}
-		}
-
-		valBytes := value[:]
-		for len(valBytes) > 0 && valBytes[0] == 0 {
-			valBytes = valBytes[1:]
-		}
-		valRLP, err := rlp.EncodeToBytes(valBytes)
-		if err != nil {
-			return fmt.Errorf("streamingtrie: rlp encode value: %w", err)
-		}
-		if err := hb.AddLeaf(keyHash, valRLP); err != nil {
-			return fmt.Errorf("streamingtrie: AddLeaf: %w", err)
-		}
-		return nil
+		return addLeaf(hb, sink, keyHash, rawKey, value)
 	}); err != nil {
 		return common.Hash{}, err
 	}
+	return finish(hb)
+}
+
+// SortedRoot is IterateRoot for a source already in keccak-ascending order with non-zero values
+// (e.g. autofill.Giant.Sorted): no drain, no temp store.
+func SortedRoot(sorted func(yield func(keyHash, rawKey, value common.Hash) bool), hb HashBuilder, sink Sink) (common.Hash, error) {
+	if hb == nil {
+		return common.Hash{}, fmt.Errorf("streamingtrie: nil HashBuilder")
+	}
+	var err error
+	sorted(func(keyHash, rawKey, value common.Hash) bool {
+		err = addLeaf(hb, sink, keyHash, rawKey, value)
+		return err == nil
+	})
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return finish(hb)
+}
+
+func addLeaf(hb HashBuilder, sink Sink, keyHash, rawKey, value common.Hash) error {
+	if sink != nil {
+		if err := sink(keyHash, rawKey, value); err != nil {
+			return fmt.Errorf("streamingtrie: sink: %w", err)
+		}
+	}
+	valBytes := value[:]
+	for len(valBytes) > 0 && valBytes[0] == 0 {
+		valBytes = valBytes[1:]
+	}
+	valRLP, err := rlp.EncodeToBytes(valBytes)
+	if err != nil {
+		return fmt.Errorf("streamingtrie: rlp encode value: %w", err)
+	}
+	if err := hb.AddLeaf(keyHash, valRLP); err != nil {
+		return fmt.Errorf("streamingtrie: AddLeaf: %w", err)
+	}
+	return nil
+}
+
+func finish(hb HashBuilder) (common.Hash, error) {
 	root, err := hb.Root()
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("streamingtrie: Root: %w", err)

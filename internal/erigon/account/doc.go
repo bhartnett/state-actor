@@ -1,6 +1,6 @@
 // Package account is a pure-Go port of Erigon's account value codec for
 // the E3 Accounts domain — the binary format Erigon uses for value bytes
-// in the `v1.0-accounts.<from>-<to>.kv` snapshot files.
+// in the `<version>-accounts.<from>-<to>.kv` snapshot files.
 //
 // # Spec source
 //

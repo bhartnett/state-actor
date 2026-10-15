@@ -128,7 +128,7 @@ jobs:
             env-prefix: BESU
             test-tags: 'cgo_besu oracle'
             test-pkg: ./client/besu/
-            test-run-filter: 'TestE2ESuite|TestDifferentialOracle|TestCFIndicesMatchNames|TestEveryColumnFamilyHasBloomFilter'
+            test-run-filter: 'TestE2ESuite|TestDifferentialOracle|TestCFIndicesMatchNames|TestEveryColumnFamilyHasBloomFilter|TestBesuGoldenStateRoot'
           - client: nethermind
             dockerfile: Dockerfile.nethermind
             image-tag: state-actor-nethermind-builder:latest
@@ -170,8 +170,8 @@ jobs:
             cache-scope: erigon-builder
             env-prefix: ERIGON
             test-tags: 'cgo_erigon cgo_erigon_commitment gofuzz oracle'
-            test-pkg: ./client/erigon/
-            test-run-filter: 'TestErigonGoldenStateRoot|TestE2ESuite|TestPatchGenesisHeaderStateRoot'
+            test-pkg: ./client/erigon/ ./internal/erigon/erigonfiles/
+            test-run-filter: 'TestErigonGoldenStateRoot|TestE2ESuite|TestPatchGenesisHeaderStateRoot|TestFilesErigonReadsBack'
           - client: nimbus
             dockerfile: Dockerfile.nimbus
             image-tag: state-actor-nimbus-builder:latest

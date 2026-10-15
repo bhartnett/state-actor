@@ -29,7 +29,8 @@
 #     --client=erigon --db=/data --target-size=4MB --seed=42
 
 # ---------- Stage 1: builder (state-actor + cgo_erigon) ----------
-FROM golang:1.25-bookworm AS builder
+# Go 1.26: the pinned Erigon's go.mod requires it.
+FROM golang:1.26-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -51,13 +52,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV CGO_ENABLED=1
 WORKDIR /app
 
-# Clone Erigon at the pinned commit on bal-devnet-7 — the EIP-7928
-# (block-access-lists) devnet branch. Merge-base with main is
-# 7827ec7268ffc9f4c4b97cfab6740d2f8fb1fdb2 (the prior pin); bal-devnet-7
-# adds forward-fix coverage on top while staying byte-identical to the
-# prior pin for every encoder state-actor's snap writer mirrors
-# (SerialiseV3, raw address keys, addr||slot storage, uint256.Bytes()
-# storage values, raw bytecode). The committed go.mod is Erigon-FREE so
+# Clone Erigon at the pinned main commit. It writes the current (v2.x)
+# snapshot file versions and carries EIP-7928 block-access lists. Every
+# snapshot file state-actor emits goes through this tree's own writers
+# (internal/erigon/erigonfiles), so the format follows this pin. The
+# committed go.mod is Erigon-FREE so
 # every other client's build (none import erigontech/erigon) resolves
 # without it — only this stage needs it. We clone the exact source tree to
 # /erigon-src and inject the require + a local replace pointing there
@@ -65,7 +64,7 @@ WORKDIR /app
 # the Go module proxy with pseudo-versions.
 RUN git clone https://github.com/erigontech/erigon.git /erigon-src \
     && cd /erigon-src \
-    && git checkout 14273f79a6
+    && git checkout 546790a6a7fce7865ef1bc54d64baab224f07cdf
 
 # No patches applied — the daemon runs STOCK upstream Erigon. The
 # block-2 "wrong trie root" stall is fixed entirely state-actor-side
@@ -87,10 +86,10 @@ COPY . .
 # cgo_erigon_commitment) resolves to the cloned source.
 RUN go mod edit -require=github.com/erigontech/erigon@v0.0.0-00010101000000-000000000000 -replace=github.com/erigontech/erigon=/erigon-src
 
-# `go mod tidy -e` against /erigon-src so the build picks up v3.4.2's
-# transitive-dep graph. Local dev (./erigon-src) may point at a different
-# erigon revision with different deps. The `-e` flag is
-# needed because v3.4.2's execution/rlp test-deps reach an ambiguous
+# `go mod tidy -e` against /erigon-src so the build picks up the pinned
+# Erigon's transitive-dep graph. Local dev (./erigon-src) may point at a
+# different erigon revision with different deps. The `-e` flag is
+# needed because Erigon's execution/rlp test-deps reach an ambiguous
 # google.golang.org/genproto/googleapis/rpc/status import (split
 # between the legacy `genproto` module and the newer
 # `genproto/googleapis/rpc` module). That ambiguity only affects test
@@ -109,7 +108,7 @@ RUN mkdir -p /out && go build -mod=mod -tags "cgo_erigon cgo_erigon_commitment g
 # Also build the erigon binary from /erigon-src (stock upstream, no
 # patches). The daemon launched by scripts/run-bloatnet.sh uses THIS
 # binary, not the upstream image — building it here keeps the daemon
-# pinned to the exact commit (14273f79a6) state-actor's commitment
+# pinned to the exact commit (546790a6a7) state-actor's commitment
 # vendor depends on.
 #
 # `unset GOFLAGS` is critical: the state-actor build above sets
@@ -129,12 +128,7 @@ RUN cd /erigon-src && \
 # runtime stage installs it at the same path for the bench daemon.
 RUN cp /out/erigon /usr/local/bin/erigon
 
-# ---------- Stage 2: extract erigon binary (pinned digest, fallback) ----------
-# Kept for documentation / fallback parity. The runtime stage below
-# uses the locally-built /out/erigon (stock, pinned commit), not this one.
-FROM erigontech/erigon@sha256:bac6b266367ec59f82576cd8cef047171601fce3f0bbbef36e3e4db24727ff6e AS erigon-bin
-
-# ---------- Stage 3: minimal runtime image ----------
+# ---------- Stage 2: minimal runtime image ----------
 FROM debian:bookworm-slim AS runtime
 
 ARG STATE_ACTOR_VERSION=dev
@@ -155,7 +149,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /out/state-actor /usr/local/bin/state-actor
 
 # erigon binary built from /erigon-src (stock upstream, pinned commit
-# 14273f79a6). The state-actor generation phase and the bench daemon
+# 546790a6a7). The state-actor generation phase and the bench daemon
 # BOTH exec this binary. PATH inheritance from the debian-slim base
 # includes /usr/local/bin so name-only lookup finds it.
 COPY --from=builder /out/erigon /usr/local/bin/erigon

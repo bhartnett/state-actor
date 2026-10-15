@@ -45,3 +45,17 @@ func TestErigonGoldenStateRoot(t *testing.T) {
 			return erigon.Run(ctx, cfg, erigon.Options{})
 		})
 }
+
+func TestErigonGoldenStateRootGiants(t *testing.T) {
+	g, err := stategenesis.BuildSynthetic("osaka", big.NewInt(1337), 60_000_000,
+		1_700_000_000, []byte{0xde, 0xad, 0xbe, 0xef})
+	if err != nil {
+		t.Fatalf("BuildSynthetic: %v", err)
+	}
+	cfg := e2e_testing.GoldenGiantRootCfg(t.TempDir())
+	cfg.Genesis = g
+	e2e_testing.AssertGoldenGiantRoot(t, "erigon", cfg,
+		func(ctx context.Context, cfg generator.Config) (*generator.Stats, error) {
+			return erigon.Run(ctx, cfg, erigon.Options{})
+		})
+}

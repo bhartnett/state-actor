@@ -1,4 +1,4 @@
-// Vendored from github.com/erigontech/erigon execution/commitment/keys_nibbles.go @ 14273f79a6 (production pin).
+// Vendored from github.com/erigontech/erigon execution/commitment/keys_nibbles.go @ 14273f79a6 (prior pin; Golden A checks it against the current pin's engine).
 // Modifications: package commitment -> hph; build tag; nibbles import rewrite; R2 strip: KeyToNibblizedHash/CompactKey/PrefixStringToNibbles/NibblesToString
 //
 //go:build cgo_erigon_commitment

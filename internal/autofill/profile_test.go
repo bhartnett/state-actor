@@ -31,7 +31,7 @@ func TestParseProfile(t *testing.T) {
 // account-dominated and stays on the streaming DrawEOA path.
 func TestProfileAccounts_PureEOAs(t *testing.T) {
 	const budget = 10 << 30 // 10 GiB
-	p, err := PlanForBudgetProfile(budget, ProfileAccounts)
+	p, err := PlanForBudgetProfile(budget, ProfileAccounts, StorageNormal)
 	if err != nil {
 		t.Fatalf("PlanForBudgetProfile(accounts): %v", err)
 	}
@@ -57,7 +57,7 @@ func TestProfileMainnet_BackwardCompat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanForBudget: %v", err)
 	}
-	viaProfile, err := PlanForBudgetProfile(budget, ProfileMainnet)
+	viaProfile, err := PlanForBudgetProfile(budget, ProfileMainnet, StorageNormal)
 	if err != nil {
 		t.Fatalf("PlanForBudgetProfile(mainnet): %v", err)
 	}

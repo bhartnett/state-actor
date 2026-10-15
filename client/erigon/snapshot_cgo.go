@@ -19,9 +19,11 @@ import (
 	"github.com/holiman/uint256"
 
 	"github.com/ethereum/state-actor/generator"
+	"github.com/ethereum/state-actor/internal/autofill"
 	internalerigon "github.com/ethereum/state-actor/internal/erigon"
 	"github.com/ethereum/state-actor/internal/erigon/account"
 	internalcommitment "github.com/ethereum/state-actor/internal/erigon/commitment"
+	"github.com/ethereum/state-actor/internal/erigon/erigonfiles"
 	"github.com/ethereum/state-actor/internal/erigon/snap"
 	"github.com/ethereum/state-actor/internal/streamsort"
 )
@@ -65,10 +67,10 @@ var erigonWorkers = func() int {
 	return n
 }()
 
-// recsplitWorkers sizes the parallel .kvi Build: min(NumCPU, 8) unless
-// STATE_ACTOR_RECSPLIT_WORKERS overrides (1 = sequential).
-func recsplitWorkers() int {
-	if v := os.Getenv("STATE_ACTOR_RECSPLIT_WORKERS"); v != "" {
+// fileWorkers sizes each domain's compressor and .kvi build: min(NumCPU, 8)
+// unless STATE_ACTOR_ERIGON_FILE_WORKERS overrides (1 = sequential).
+func fileWorkers() int {
+	if v := os.Getenv("STATE_ACTOR_ERIGON_FILE_WORKERS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
 			return n
 		}
@@ -111,11 +113,17 @@ func envCacheBytes(envVar string, defaultGB int) int64 {
 
 // entityWork is one alloc entry queued for an encode-worker. The main
 // goroutine fills these and sends them on entityCh; workers consume
-// and call encodeEntity.
+// and call encodeEntity, or, when giant is set, encode the giant's
+// storage slots [lo, hi) instead.
 type entityWork struct {
-	addr  common.Address
-	entry *allocAccount
+	addr   common.Address
+	entry  *allocAccount
+	giant  *autofill.Giant
+	lo, hi uint64
 }
+
+// giantChunkSlots is how many giant storage slots one entityWork carries.
+const giantChunkSlots = 1 << 16
 
 // domainWrite is one (key, value) tuple ready to be Put into a specific
 // streamsort. Sent from encode workers to per-domain writer goroutines.
@@ -421,8 +429,9 @@ func writeSnapshots(
 			if acc.StateAccount.Balance != nil {
 				entry.Balance = acc.StateAccount.Balance.ToBig()
 			}
-			// EIP-7702 designator (2 % of autofill EOAs): mirror geth state_writer.go or
-			// CodeHash diverges from the MPT root (cross-client bench 2026-06-03, SEED=42).
+			// Code-bearing EOA (7702 designator, or arbitrary code under the mainnet
+			// account model): mirror geth state_writer.go or CodeHash diverges from
+			// the MPT root (cross-client bench 2026-06-03, SEED=42).
 			if len(acc.Code) > 0 {
 				entry.Code = acc.Code
 				stats.CodeBytes += uint64(len(acc.Code))
@@ -462,6 +471,26 @@ func writeSnapshots(
 			stats.StorageBytes += uint64(len(c.Storage)) * 64
 			stats.ContractsCreated++
 			cfg.Progress.Tick(int64(i+1), int64(autoFill.NumContracts), "contracts")
+		}
+		// Giants: account through the normal path, storage as slot-index
+		// chunks generated on the workers (never materialized), largest first.
+		for k := 0; k < autoFill.Giants && pipelineErr == nil; k++ {
+			g := autoFill.Giant(cfg.Seed, k)
+			if err := sendEntity(entityWork{addr: g.Address, entry: &allocAccount{Nonce: g.Nonce, Balance: g.Balance.ToBig(), Code: g.Code}}); err != nil {
+				pipelineErr = err
+				break
+			}
+			for lo := uint64(0); lo < g.Slots; lo += giantChunkSlots {
+				if err := sendEntity(entityWork{addr: g.Address, giant: g, lo: lo, hi: min(lo+giantChunkSlots, g.Slots)}); err != nil {
+					pipelineErr = err
+					break
+				}
+			}
+			stats.CodeBytes += uint64(len(g.Code))
+			stats.StorageSlotsCreated += int(g.Slots)
+			stats.StorageBytes += g.Slots * 64
+			stats.ContractsCreated++
+			cfg.Progress.Tick(int64(k+1), int64(autoFill.Giants), "giants")
 		}
 	}
 	stats.TotalBytes = stats.StorageBytes + stats.CodeBytes
@@ -594,20 +623,18 @@ func writeSnapshots(
 	// Overlap the Phase-5b accounts/storage/code snapshot-write with the
 	// commitment fold below. These three domains depend only on the finalized
 	// accountsStore/storageStore/codeStore + counts — NOT on the fold's result —
-	// so start them NOW and let their (mostly single-core) compression run on
-	// the cores the 16-way fold leaves idle. Only WriteCommitment needs the
-	// fold's branches + keyStateValue, so it is queued after the fold. The
-	// Writer is immutable and every domain writes its own files, so all these
+	// so start them NOW and let their compression run beside the 16-way
+	// fold. Only WriteCommitment needs the fold's branches + keyStateValue;
+	// it runs after the fold and after these three (see Step 5b). The
+	// Writer is immutable and every domain writes its own files, so these
 	// goroutines are race-free.
 	settings := snap.Settings{
 		Seed:              cfg.Seed,
 		StepSize:          internalerigon.StepSize,
 		StepsInFrozenFile: internalerigon.StepsInFrozenFile,
-		SnapshotVersion:   internalerigon.SnapshotFormatVersion,
-		// Parallel .kvi Build (byte-identical at any count). Default
-		// min(NumCPU, 8): it runs at the very tail when the value-domain
-		// writers have drained. STATE_ACTOR_RECSPLIT_WORKERS overrides.
-		RecSplitWorkers: recsplitWorkers(),
+		// Every file in Erigon's own format, at the pinned Erigon's versions; see erigonfiles.
+		// The worker count doesn't change the files, only how fast the domains compress.
+		Files: erigonfiles.Files{Workers: fileWorkers()},
 	}
 	w, err := snap.NewWriter(cfg.DBPath, settings)
 	if err != nil {
@@ -625,7 +652,7 @@ func writeSnapshots(
 		{snap.DomainStorage, storageStore, counts.storage},
 		{snap.DomainCode, codeStore, counts.code},
 	}
-	emitErrCh := make(chan error, len(domainSpecs)+1) // +1 for commitment
+	emitErrCh := make(chan error, len(domainSpecs))
 	var emitWg sync.WaitGroup
 	sem := make(chan struct{}, runtime.NumCPU())
 	for _, ds := range domainSpecs {
@@ -634,8 +661,14 @@ func writeSnapshots(
 		go func(ds domainSpec) {
 			defer func() { <-sem; emitWg.Done() }()
 			start := time.Now()
-			if err := w.WriteDomain(ctx, ds.domain, fullRange, ds.count,
-				snap.FromStreamsort(ds.store)); err != nil {
+			// Erigon's compressor copies every entry into its own raw file before it compresses,
+			// so drop the sorted store once it has been read instead of holding both copies until
+			// every domain is done: at 50 GB the stores were a third of the peak disk.
+			entries := func(yield func(snap.DomainEntry) bool) {
+				snap.FromStreamsort(ds.store)(yield)
+				_ = ds.store.Close()
+			}
+			if err := w.WriteDomain(ctx, ds.domain, fullRange, ds.count, entries); err != nil {
 				select {
 				case emitErrCh <- fmt.Errorf("WriteDomain(%v): %w", ds.domain, err):
 				default:
@@ -660,9 +693,8 @@ func writeSnapshots(
 		fmt.Printf("client/erigon: timing fold %s\n", time.Since(foldStart).Round(time.Second))
 	}
 	// The retained branch source outlives the fold. The defer is safe on
-	// every path because its only reader — the WriteCommitment goroutine —
-	// is spawned AFTER the early error returns below and is joined by
-	// emitWg.Wait() before the success return.
+	// every path because its only reader, WriteCommitment below, runs on
+	// this goroutine.
 	defer result.CloseBranches()
 	// Close the 16 commit-input sub-stores NOW (not at function scope):
 	// their caches/memtables/spill dirs are dead weight during the
@@ -687,42 +719,35 @@ func writeSnapshots(
 		return common.Hash{}, fmt.Errorf("writeSnapshots: encode KeyCommitmentState: %w", err)
 	}
 
-	// -- Step 5b: accounts/storage/code are already being written (fan-out
-	// started above, overlapping the fold). Queue the commitment domain now
-	// that the fold has produced its branches + keyStateValue.
-	//
-	// Commitment: single [0,1) range. It is the LARGEST domain (~44 GB .kv at
-	// 100 GB, plus the only recsplit MPHF over ~nBranches keys) yet depends
-	// only on the fold's retained branch store + keyStateValue — NOT on the
-	// other domains. Run it as a 4th goroutine in the SAME fan-out (the Writer
-	// is immutable and each domain writes its own files) so its long build
-	// overlaps accounts/storage/code instead of running serially after them.
+	// -- Step 5b: write the commitment domain once accounts/storage/code are
+	// done. It is the largest domain, and Erigon's compressor holds three
+	// copies of a domain while it compresses (raw .idt, intermediate, final);
+	// overlapping it with the others stacked their copies on top of those
+	// (50 GB store: peak disk 152 GB overlapped, 130 GB after, 4.5 min more).
 	// The branch rows stream STRAIGHT from the walk's live branch store
 	// (Result.BranchIterate is already ascending; WriteCommitment splices the
 	// KeyCommitmentState row at its sort position) — no intermediate re-sort
 	// store. frozenSteps(commitment)=0 so the daemon's mem-tier
 	// KeyCommitmentState writes pass CheckDataAvailable trivially (see the
 	// fullRange doc above).
-	sem <- struct{}{}
-	emitWg.Add(1)
-	go func() {
-		defer func() { <-sem; emitWg.Done() }()
-		start := time.Now()
-		if err := snap.WriteCommitment(ctx, w, fullRange, keyStateValue, snap.BranchStream(result.BranchIterate), nBranches); err != nil {
-			select {
-			case emitErrCh <- fmt.Errorf("WriteCommitment: %w", err):
-			default:
-			}
-		}
-		if cfg.Verbose {
-			fmt.Printf("client/erigon: timing WriteCommitment %s\n", time.Since(start).Round(time.Second))
-		}
-	}()
 	emitWg.Wait()
 	select {
 	case err := <-emitErrCh:
 		return common.Hash{}, fmt.Errorf("writeSnapshots: %w", err)
 	default:
+	}
+	commitStart := time.Now()
+	// Same as the domain stores above: the branch rows are copied once, then dropped.
+	branches := func(yield func(prefix, data []byte) error) error {
+		err := result.BranchIterate(yield)
+		result.CloseBranches()
+		return err
+	}
+	if err := snap.WriteCommitment(ctx, w, fullRange, keyStateValue, branches, nBranches); err != nil {
+		return common.Hash{}, fmt.Errorf("writeSnapshots: WriteCommitment: %w", err)
+	}
+	if cfg.Verbose {
+		fmt.Printf("client/erigon: timing WriteCommitment %s\n", time.Since(commitStart).Round(time.Second))
 	}
 
 	if cfg.Verbose {
@@ -783,7 +808,15 @@ func autofillEncodeWorker(
 				// dropping them would silently lose rows.
 				return senders.flushAll()
 			}
-			if err := encodeEntity(ctx, ew, senders, counts); err != nil {
+			if ew.giant != nil {
+				part := uint8(internalcommitment.InputPart(ew.addr[:]))
+				for j := ew.lo; j < ew.hi; j++ {
+					key, value := ew.giant.Slot(j)
+					if err := encodeStorageSlot(ctx, ew.addr, key, value, part, senders, counts); err != nil {
+						return err
+					}
+				}
+			} else if err := encodeEntity(ctx, ew, senders, counts); err != nil {
 				return err
 			}
 		}
@@ -826,9 +859,10 @@ func encodeEntity(
 	// Hash the code ONCE here (for the snapshot CodeHash) and reuse it for the
 	// commitment Update below — EncodeAccountUpdate would otherwise keccak the
 	// same bytes a second time (commitment.go). nil = no code.
+	code := ew.entry.code()
 	var codeHash *common.Hash
-	if len(ew.entry.Code) > 0 {
-		h := crypto.Keccak256Hash(ew.entry.Code)
+	if len(code) > 0 {
+		h := crypto.Keccak256Hash(code)
 		copy(acct.CodeHash[:], h[:])
 		codeHash = &h
 	}
@@ -838,8 +872,8 @@ func encodeEntity(
 	atomic.AddUint64(&counts.accounts, 1)
 
 	// Code snapshot value: raw bytecode keyed by addr.
-	if len(ew.entry.Code) > 0 {
-		if err := out.code.send(domainWrite{key: addrKey, value: ew.entry.Code}); err != nil {
+	if len(code) > 0 {
+		if err := out.code.send(domainWrite{key: addrKey, value: code}); err != nil {
 			return err
 		}
 		atomic.AddUint64(&counts.code, 1)

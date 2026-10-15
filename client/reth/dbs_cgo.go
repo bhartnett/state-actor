@@ -88,7 +88,21 @@ type Envs struct {
 	// initialised by HistorySink; Close drains + tears it down.
 	historySink *historySink
 
+	// Fill switches MDBX_opt_split_reserve per table for the active
+	// --mdbx-fill-profile (see RunCgo). nil outside RunCgo (e.g. tests that
+	// call OpenEnvs directly) — useFill is then a no-op.
+	Fill *fillController
+
 	closed bool
+}
+
+// useFill switches split_reserve to table's profile target before a write,
+// a no-op when e.Fill is nil (no profile in effect).
+func (e *Envs) useFill(table string) error {
+	if e.Fill == nil {
+		return nil
+	}
+	return e.Fill.use(table)
 }
 
 // HistorySink returns the per-Envs archive-mode history sink, creating it
@@ -169,6 +183,25 @@ func OpenEnvs(dataDir string, freshDir bool) (*Envs, error) {
 		return nil, fmt.Errorf("mdbx.Open(%s): %w", dbDir, err)
 	}
 	envs.Mdbx = env
+
+	// reth vendors libmdbx 0.13.12, where prefer_waf_insteadof_balance
+	// defaults to false; the vendored libmdbx 0.14.2 in mdbx-go 0.40.1
+	// defaults it to true, which packs random-order inserts to ~0.50 leaf
+	// fill instead of reth's ~0.66. Force reth's default explicitly and
+	// read it back so a libmdbx upgrade that changes the default (or
+	// drops the option) fails loudly instead of silently shifting every
+	// un-profiled table's fill.
+	if err := env.SetOption(mdbx.OptPreferWafInsteadofBalance, 0); err != nil {
+		env.Close()
+		return nil, fmt.Errorf("mdbx.SetOption(OptPreferWafInsteadofBalance): %w", err)
+	}
+	if got, err := env.GetOption(mdbx.OptPreferWafInsteadofBalance); err != nil {
+		env.Close()
+		return nil, fmt.Errorf("mdbx.GetOption(OptPreferWafInsteadofBalance): %w", err)
+	} else if got != 0 {
+		env.Close()
+		return nil, fmt.Errorf("mdbx.GetOption(OptPreferWafInsteadofBalance): got %d, want 0", got)
+	}
 
 	// Pre-resolve all named DBIs. Update (write txn) is required because
 	// mdbx.Create needs write access.

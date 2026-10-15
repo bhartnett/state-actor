@@ -30,6 +30,14 @@ func TestBesuGoldenStateRoot(t *testing.T) {
 		})
 }
 
+func TestBesuGoldenStateRootGiants(t *testing.T) {
+	cfg := e2e_testing.GoldenGiantRootCfg(t.TempDir())
+	e2e_testing.AssertGoldenGiantRoot(t, "besu", cfg,
+		func(ctx context.Context, cfg generator.Config) (*generator.Stats, error) {
+			return Run(ctx, cfg, Options{})
+		})
+}
+
 // TestBesuReproducibility verifies that the same config + seed produces the
 // same on-disk worldRoot sentinel across runs. Guards against any latent
 // non-determinism in entity generation, Pebble batch ordering, or trie

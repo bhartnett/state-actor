@@ -119,10 +119,10 @@ func TestContractWithStorageProducesRoot(t *testing.T) {
 }
 
 // TestComputeGenesisRoot_IncludesRootBranch is the regression gate for
-// the bug where ParallelHashSort returned the root hash without
-// flushing the root HexPatriciaHashed's deferred branch updates.
-// Without the explicit ApplyAndClearInlineDeferredUpdates call in
-// ComputeGenesisRoot, the branch row set would be missing
+// the bug where the engine path returned the root hash without
+// persisting the root trie's deferred branch updates (fixed then by an
+// explicit flush; ParallelPatriciaHashed.Process now applies them,
+// root included). Without them the branch row set would be missing
 // the root-level (depth-0) branch entry, producing silent state-root
 // divergence at any alloc that lands in 16+ distinct first nibbles.
 //
@@ -147,7 +147,7 @@ func TestComputeGenesisRoot_IncludesRootBranch(t *testing.T) {
 	}
 	branches := collectBranches(t, &res)
 	if len(branches) == 0 {
-		t.Fatalf("expected ≥ 1 branch node for 16-account alloc spanning all first nibbles; got 0 — root-level branch was not flushed (Bug 2 regression: ApplyAndClearInlineDeferredUpdates not called after pph.Process)")
+		t.Fatalf("expected ≥ 1 branch node for 16-account alloc spanning all first nibbles; got 0 — the root-level branch was not persisted")
 	}
 	t.Logf("16-account root: %s (%d branch nodes)", res.Root.Hex(), len(branches))
 }

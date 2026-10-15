@@ -22,6 +22,15 @@ type Plan struct {
 	// DistinctBytecodes is the code-pool size: each contract draws one of
 	// these shared blobs (see poolCode).
 	DistinctBytecodes int
+	// StorageModel selects how DrawContract sizes and fills a contract's storage.
+	StorageModel StorageModel
+	// AccountModel shapes DrawEOA's storage-less accounts and every storage account's nonce and
+	// balance (account_model.go); nil is the normal model.
+	AccountModel *AccountModel
+	// Giants is the StorageMainnet contract count at or above GiantMinSlots (see Giant), not
+	// counted in NumContracts; GiantSlots is their slot total.
+	Giants     int
+	GiantSlots uint64
 
 	// SkipDerivedHashes elides the RNG-neutral derived-hash work on the
 	// single-threaded draw goroutine (the AddrHash keccak and the
@@ -70,10 +79,10 @@ func ParseProfile(s string) (Profile, error) {
 	}
 }
 
-// PlanForBudget builds a mainnet-shaped (20/10/70) Plan. Thin wrapper over
-// PlanForBudgetProfile(topUp, ProfileMainnet).
+// PlanForBudget builds a mainnet-shaped (20/10/70) Plan with the default storage model. Thin wrapper
+// over PlanForBudgetProfile(topUp, ProfileMainnet, StorageNormal).
 func PlanForBudget(topUp uint64) (*Plan, error) {
-	return PlanForBudgetProfile(topUp, ProfileMainnet)
+	return PlanForBudgetProfile(topUp, ProfileMainnet, StorageNormal)
 }
 
 // PlanForBudgetProfile builds a Plan that, if fully consumed, would emit
@@ -90,7 +99,11 @@ func PlanForBudget(topUp uint64) (*Plan, error) {
 // Returns an error when topUp is below the account-trie cost of a single
 // EOA (175 B). A non-nil Plan is safe to consume even when NumContracts is
 // zero (e.g. when bytecode budget is below the minimum code size).
-func PlanForBudgetProfile(topUp uint64, profile Profile) (*Plan, error) {
+//
+// StorageMainnet instead derives the contract count from the storage budget: drawn contracts at the
+// table's mean slot count plus Giants at or above GiantMinSlots (solveMainnetContracts). Contracts
+// are drawn out of the account budget, so the total account count is the same under both models.
+func PlanForBudgetProfile(topUp uint64, profile Profile, model StorageModel) (*Plan, error) {
 	bytesPerAccount := sizecal.BytesPerAccount("")
 	if topUp < bytesPerAccount {
 		return nil, fmt.Errorf("autofill: target_size %d B below one account (%d B)", topUp, bytesPerAccount)
@@ -102,14 +115,17 @@ func PlanForBudgetProfile(topUp uint64, profile Profile) (*Plan, error) {
 	bCode := uint64(budgetF * rCode)
 	bStorage := uint64(budgetF * rStorage)
 
-	var numContracts int
+	var numContracts, giants int
 	storageSampler := Sampler{
 		Min: sizecal.MinContractStorage,
 		Max: sizecal.MaxContractStorage,
 	}
 
 	bytesPerSlot := sizecal.BytesPerSlot("")
-	if bCode >= sizecal.MinContractCode && bStorage >= bytesPerSlot {
+	switch {
+	case model == StorageMainnet && bStorage >= bytesPerSlot:
+		numContracts, giants = solveMainnetContracts(bStorage / bytesPerSlot)
+	case bCode >= sizecal.MinContractCode && bStorage >= bytesPerSlot:
 		// Round bCode / MeanContractCode → contract count.
 		numContracts = int((bCode + sizecal.MeanContractCode/2) / sizecal.MeanContractCode)
 		if numContracts > 0 {
@@ -121,13 +137,14 @@ func PlanForBudgetProfile(topUp uint64, profile Profile) (*Plan, error) {
 		}
 	}
 
-	accountUsed := uint64(numContracts) * bytesPerAccount
+	totalContracts := numContracts + giants
+	accountUsed := uint64(totalContracts) * bytesPerAccount
 	var numEOAs int
 	if bAcct > accountUsed {
 		numEOAs = int((bAcct - accountUsed) / bytesPerAccount)
 	}
 
-	if numEOAs == 0 && numContracts == 0 {
+	if numEOAs == 0 && totalContracts == 0 {
 		return nil, fmt.Errorf("autofill: budget %d B too small for any entity", topUp)
 	}
 
@@ -145,14 +162,20 @@ func PlanForBudgetProfile(topUp uint64, profile Profile) (*Plan, error) {
 		EOAFlavors:        DefaultEOAFlavors(),
 		CodeSampler:       codeSampler,
 		StorageSampler:    storageSampler,
-		DistinctBytecodes: max(numContracts/sizecal.MainnetAccountsPerDistinctBytecode, 1),
+		DistinctBytecodes: max(totalContracts/sizecal.MainnetAccountsPerDistinctBytecode, 1),
+		StorageModel:      model,
+		Giants:            giants,
+		GiantSlots:        giantSlotSum(giants),
 	}, nil
 }
 
-// DrawEOA produces one synthetic EOA, advancing rng by the canonical 3
-// entitygen.GenerateEOA draws plus 2 Bernoulli Float64s plus a conditional
-// pool-index draw (when the delegation Bernoulli fires).
+// DrawEOA produces one synthetic EOA. Under the normal model it advances rng by the canonical 3
+// entitygen.GenerateEOA draws plus 2 Bernoulli Float64s plus a conditional pool-index draw (when
+// the delegation Bernoulli fires); a non-nil AccountModel draws per AccountModel.drawEOA instead.
 func (p *Plan) DrawEOA(rng *mrand.Rand) *entitygen.Account {
+	if p.AccountModel != nil {
+		return p.AccountModel.drawEOA(rng, p.SkipDerivedHashes)
+	}
 	if p.SkipDerivedHashes {
 		return GenerateEOAFlavoredLean(rng, p.EOAFlavors)
 	}
@@ -161,11 +184,23 @@ func (p *Plan) DrawEOA(rng *mrand.Rand) *entitygen.Account {
 
 // DrawContract produces one synthetic contract. RNG draw order is fixed
 // across all client emission sites:
-//  1. StorageSampler.Draw(rng) — storage bytes; slot count = bytes / sizecal.BytesPerSlot.
-//  2. rng.Intn(DistinctBytecodes) — code-pool index (see poolCode).
-//  3. entitygen.GenerateContractWithCode(rng, code, hash, numSlots).
+//  1. the slot count: StorageSampler.Draw(rng) bytes / sizecal.BytesPerSlot, or one
+//     rng.Float64 under StorageMainnet;
+//  2. rng.Intn(DistinctBytecodes) — code-pool index (see poolCode);
+//  3. entitygen.GenerateContractWithCode(rng, code, hash, numSlots, valueLen), valueLen
+//     non-nil (mainnet value lengths) only under StorageMainnet; AccountModel.drawContract
+//     instead under a non-nil AccountModel.
 func (p *Plan) DrawContract(rng *mrand.Rand) *entitygen.Account {
-	numSlots := max(int(p.StorageSampler.Draw(rng)/sizecal.BytesPerSlot("")), 1)
+	var numSlots int
+	var valueLen func(*mrand.Rand) int
+	if p.StorageModel == StorageMainnet {
+		numSlots, valueLen = drawMainnetSlots(rng), drawMainnetValueLen
+	} else {
+		numSlots = max(int(p.StorageSampler.Draw(rng)/sizecal.BytesPerSlot("")), 1)
+	}
 	code, hash := poolCode(rng.Intn(p.DistinctBytecodes), p.CodeSampler)
-	return entitygen.GenerateContractWithCode(rng, code, hash, numSlots)
+	if p.AccountModel != nil {
+		return p.AccountModel.drawContract(rng, code, hash, numSlots, valueLen)
+	}
+	return entitygen.GenerateContractWithCode(rng, code, hash, numSlots, valueLen)
 }

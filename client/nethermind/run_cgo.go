@@ -92,7 +92,7 @@ func runImpl(ctx context.Context, cfg generator.Config, opts Options) (*generato
 	plannedEOAs, plannedContracts := 0, 0
 	if cfg.AutoFill != nil {
 		plannedEOAs = cfg.AutoFill.NumEOAs
-		plannedContracts = cfg.AutoFill.NumContracts
+		plannedContracts = cfg.AutoFill.NumContracts + cfg.AutoFill.Giants
 	}
 	if plannedEOAs > 0 || plannedContracts > 0 || len(allocAccounts) > 0 {
 		stateRoot, err = writeSyntheticAccounts(ctx, dbs, cfg, allocAccounts, allocCodes, allocStorages, stats)

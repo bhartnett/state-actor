@@ -1,4 +1,4 @@
-// Vendored from github.com/erigontech/erigon execution/commitment/metrics.go @ 14273f79a6 (production pin).
+// Vendored from github.com/erigontech/erigon execution/commitment/metrics.go @ 14273f79a6 (prior pin; Golden A checks it against the current pin's engine).
 // Modifications: package commitment -> hph; build tag; R2+R3: reduced to the live counter subset (CSV read+write paths, MetricValues, Reset/AsValues/headers, cache/miss counters removed)
 //
 //go:build cgo_erigon_commitment

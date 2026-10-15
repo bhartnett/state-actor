@@ -19,5 +19,5 @@
 //	docker run --rm -v $PWD/_artifacts:/data state-actor-erigon \
 //	  --client=erigon --db=/data --target-size=500MB --seed=42
 //
-// Pinned upstream image: see internal/erigon/constants.go.
+// Pinned Erigon commit: see Dockerfile.erigon.
 package erigon

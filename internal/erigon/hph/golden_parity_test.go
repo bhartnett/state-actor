@@ -291,25 +291,32 @@ func TestGoldenA_VendoredMatchesUpstream16Way(t *testing.T) {
 		t.Fatalf("vendored ApplyDeferred: %v", err)
 	}
 
-	// --- upstream (erigon module) engine run ---
+	// --- upstream (erigon module) engine run: the parallel engine Erigon runs ---
 	us := &mockState{branches: map[string][]byte{}, accounts: map[string][]byte{}, storage: map[string][]byte{}}
 	uKeys := encodeFixture(accs, us, encodeUpstreamAcc, encodeUpstreamStor)
-	uCtx := &upstreamCtx{s: us}
-	uUpds := upstream.NewUpdates(upstream.ModeDirect, t.TempDir(), upstream.KeyToHexNibbleHash)
-	uUpds.SetConcurrentCommitment(true)
-	var placeholderU upstream.Update
+	uUpds := upstream.NewUpdates(upstream.ModeParallel, t.TempDir(), upstream.KeyToHexNibbleHash)
+	defer uUpds.Close()
 	for _, k := range uKeys {
-		uUpds.TouchPlainKeyDirect(k, &placeholderU)
+		enc := us.accounts[k]
+		if enc == nil {
+			enc = us.storage[k]
+		}
+		var u upstream.Update
+		if _, err := u.Decode(enc, 0); err != nil {
+			t.Fatalf("decode %x: %v", k, err)
+		}
+		uUpds.TouchPlainKeyDirect(k, &u)
 	}
-	uHph := upstream.NewHexPatriciaHashed(20, uCtx)
-	uPph := upstream.NewConcurrentPatriciaHashed(uHph, uCtx)
-	uRoot, err := uPph.Process(context.Background(), uUpds, "goldenA-upstream", nil,
-		upstream.WarmupConfig{CtxFactory: func() (upstream.PatriciaContext, func()) { return &upstreamCtx{s: us}, func() {} }})
+	uCfg := upstream.DefaultTrieConfig()
+	uCfg.Variant = upstream.VariantParallelHexPatricia
+	uPph := upstream.NewParallelPatriciaHashed(func(context.Context) (upstream.PatriciaContext, func()) {
+		return &upstreamCtx{s: us}, func() {}
+	}, 20, uCfg)
+	defer uPph.Release()
+	uPph.ResetContext(&upstreamCtx{s: us})
+	uRoot, err := uPph.Process(context.Background(), uUpds, "goldenA-upstream", nil, upstream.WarmupConfig{})
 	if err != nil {
 		t.Fatalf("upstream Process: %v", err)
-	}
-	if err := uHph.ApplyAndClearInlineDeferredUpdates(); err != nil {
-		t.Fatalf("upstream ApplyDeferred: %v", err)
 	}
 
 	// --- byte comparisons ---
@@ -327,7 +334,7 @@ func TestGoldenA_VendoredMatchesUpstream16Way(t *testing.T) {
 		t.Fatalf("branch row count diverged: vendored=%d upstream=%d", len(vs.branches), len(us.branches))
 	}
 	vState, verr := vHph.EncodeCurrentState(nil)
-	uState, uerr := uHph.EncodeCurrentState(nil)
+	uState, uerr := uPph.RootTrie().EncodeCurrentState(nil)
 	if verr != nil || uerr != nil {
 		t.Fatalf("EncodeCurrentState: vendored=%v upstream=%v", verr, uerr)
 	}

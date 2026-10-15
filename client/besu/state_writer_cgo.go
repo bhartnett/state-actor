@@ -16,6 +16,7 @@ import (
 	"github.com/holiman/uint256"
 
 	"github.com/ethereum/state-actor/generator"
+	"github.com/ethereum/state-actor/internal/autofill"
 	"github.com/ethereum/state-actor/internal/besu"
 	besurlp "github.com/ethereum/state-actor/internal/besu/rlp"
 	besutrie "github.com/ethereum/state-actor/internal/besu/trie"
@@ -60,7 +61,14 @@ func writeStateAndCollectRoot(
 		hashToAddr[crypto.Keccak256Hash(addr[:])] = addr
 	}
 
-	if err := runPhase0(ctx, cfg, db, stats); err != nil {
+	var giants []*autofill.Giant
+	if cfg.AutoFill != nil {
+		for k := range cfg.AutoFill.Giants {
+			giants = append(giants, cfg.AutoFill.Giant(cfg.Seed, k))
+		}
+	}
+	giantRoots, err := runPhase0(ctx, cfg, db, stats, giants)
+	if err != nil {
 		return common.Hash{}, nil, nil, err
 	}
 
@@ -108,7 +116,7 @@ func writeStateAndCollectRoot(
 		if balance == nil {
 			balance = uint256.NewInt(0)
 		}
-		code := cfg.GenesisCode[addr]
+		code := cfg.CodeAt(addr)
 		var blob []byte
 		if len(code) == 0 && len(cfg.GenesisStorage[addr]) == 0 {
 			blob = encodeEntityEOA(acc.Nonce, balance)
@@ -140,6 +148,14 @@ func writeStateAndCollectRoot(
 		}
 	}
 
+	// Giants' storage was written in Phase 0; only the account goes through the sorter.
+	for _, g := range giants {
+		if err := sorter.Put(g.AddrHash[:], encodeEntityContract(g.Nonce, g.Balance, g.Code, nil)); err != nil {
+			return common.Hash{}, nil, nil, fmt.Errorf("besu: phase1 giant %s: %w", g.Address.Hex(), err)
+		}
+		stats.StorageSlotsCreated += int(g.Slots)
+	}
+
 	// --- Phase 2: iterate sorted, drive Builder + flat-state writes. ---
 	// entitiesQueued is the exact count Put into the sorter above (synthetic
 	// EOAs/contracts + deduped genesis allocs) — the Phase-2 progress total.
@@ -147,7 +163,7 @@ func writeStateAndCollectRoot(
 	if plan != nil {
 		entitiesQueued += int64(plan.NumEOAs + plan.NumContracts)
 	}
-	entitiesQueued += int64(len(seenAlloc))
+	entitiesQueued += int64(len(seenAlloc) + len(giants))
 	cfg.Progress.Stage("besu: phase 2/2 — building state trie")
 	var phase2Count int64
 	if err := sorter.Iterate(func(key, value []byte) error {
@@ -165,6 +181,8 @@ func writeStateAndCollectRoot(
 				acc.Root != (common.Hash{}) && acc.Root != besu.EmptyTrieNodeHash {
 				storageRoot = acc.Root
 			}
+		} else if root, ok := giantRoots[addrHash]; ok {
+			storageRoot = root
 		}
 		codeHash := besu.EmptyCodeHash
 		if entity.kind == entityContract {
@@ -307,7 +325,9 @@ func encodeEntityContract(nonce uint64, balance *uint256.Int, code []byte, slots
 	return out
 }
 
-// runPhase0 drives the spec-PreAlloc streaming-trie phase in parallel.
+// runPhase0 streams storage tries in parallel: spec-PreAlloc entities
+// (drained through a temp streamsort) and auto-fill giants (already
+// keccak-sorted, no temp store). Returns giants' roots keyed by addrHash.
 //
 // For every entity with pe.Storage != nil, a worker:
 //  1. Owns its own *nodeSink wrapping a per-worker *grocksdb.WriteBatch.
@@ -318,7 +338,8 @@ func encodeEntityContract(nonce uint64, balance *uint256.Int, code []byte, slots
 //  2. Constructs its own besutrie.StreamingStorageBuilder via
 //     NewStreamingStorageBuilder so trie-node writes route through the
 //     per-worker sink, not the shared outer-builder sink.
-//  3. Calls streamingtrie.StorageRoot to drain the iter into a per-call
+//  3. Computes the root via streamingtrie.StorageRoot (spec: drains into a
+//     per-call streamsort.Store under cfg.DBPath) or SortedRoot (giants),
 //     streamsort.Store (rooted under cfg.DBPath, not /tmp), walk it
 //     sorted, drive the streaming builder, and emit flat-state writes
 //     via a closure that calls workerSink.PutFlatStorage.
@@ -327,15 +348,26 @@ func encodeEntityContract(nonce uint64, balance *uint256.Int, code []byte, slots
 //
 // Across-entity Bonsai keyspaces are disjoint (every key prefixed by
 // addrHash for trie + flat), so parallel writes don't conflict.
-func runPhase0(ctx context.Context, cfg generator.Config, db *besuDB, stats *generator.Stats) error {
-	indices := make([]int, 0, len(cfg.PreAlloc))
+func runPhase0(ctx context.Context, cfg generator.Config, db *besuDB, stats *generator.Stats, giants []*autofill.Giant) (map[common.Hash]common.Hash, error) {
+	type streamed struct {
+		addr common.Address
+		root func(streamingtrie.HashBuilder, streamingtrie.Sink) (common.Hash, error)
+	}
+	var items []streamed
 	for i := range cfg.PreAlloc {
-		if cfg.PreAlloc[i].Storage != nil {
-			indices = append(indices, i)
+		if pe := &cfg.PreAlloc[i]; pe.Storage != nil {
+			items = append(items, streamed{pe.Address, func(hb streamingtrie.HashBuilder, sink streamingtrie.Sink) (common.Hash, error) {
+				return streamingtrie.StorageRoot(cfg.DBPath, pe.Storage, hb, sink)
+			}})
 		}
 	}
-	if len(indices) == 0 {
-		return nil
+	for _, g := range giants {
+		items = append(items, streamed{g.Address, func(hb streamingtrie.HashBuilder, sink streamingtrie.Sink) (common.Hash, error) {
+			return streamingtrie.SortedRoot(g.Sorted, hb, sink)
+		}})
+	}
+	if len(items) == 0 {
+		return nil, nil
 	}
 
 	// Phase 0 streams each spec entity's storage slots and is otherwise silent
@@ -352,13 +384,13 @@ func runPhase0(ctx context.Context, cfg generator.Config, db *besuDB, stats *gen
 	if workers > maxPhase0Workers {
 		workers = maxPhase0Workers
 	}
-	if workers > len(indices) {
-		workers = len(indices)
+	if workers > len(items) {
+		workers = len(items)
 	}
 
 	type preparedEntity struct {
-		idx          int
 		addr         common.Address
+		addrHash     common.Hash
 		root         common.Hash
 		storageBytes uint64
 	}
@@ -388,8 +420,8 @@ func runPhase0(ctx context.Context, cfg generator.Config, db *besuDB, stats *gen
 				if drainCtx.Err() != nil {
 					return
 				}
-				pe := &cfg.PreAlloc[i]
-				addr := pe.Address
+				it := items[i]
+				addr := it.addr
 				addrHash := crypto.Keccak256Hash(addr[:])
 
 				sb := besutrie.NewStreamingStorageBuilder(workerSink, addrHash)
@@ -400,13 +432,13 @@ func runPhase0(ctx context.Context, cfg generator.Config, db *besuDB, stats *gen
 					entityStorageBytes += uint64(len(trimmed))
 					return workerSink.PutFlatStorage(addrHash, keyHash, trimmed)
 				}
-				root, err := streamingtrie.StorageRoot(cfg.DBPath, pe.Storage, sb, streamSink)
+				root, err := it.root(sb, streamSink)
 				if err != nil {
-					cancelDrain(fmt.Errorf("besu: stream spec storage[%d] %s: %w", i, addr.Hex(), err))
+					cancelDrain(fmt.Errorf("besu: phase0 storage %s: %w", addr.Hex(), err))
 					return
 				}
 				select {
-				case preparedCh <- preparedEntity{idx: i, addr: addr, root: root, storageBytes: entityStorageBytes}:
+				case preparedCh <- preparedEntity{addr: addr, addrHash: addrHash, root: root, storageBytes: entityStorageBytes}:
 				case <-drainCtx.Done():
 					return
 				}
@@ -416,7 +448,7 @@ func runPhase0(ctx context.Context, cfg generator.Config, db *besuDB, stats *gen
 
 	go func() {
 		defer close(drainCh)
-		for _, i := range indices {
+		for i := range items {
 			select {
 			case drainCh <- i:
 			case <-drainCtx.Done():
@@ -430,16 +462,19 @@ func runPhase0(ctx context.Context, cfg generator.Config, db *besuDB, stats *gen
 		close(preparedCh)
 	}()
 
+	giantRoots := make(map[common.Hash]common.Hash, len(giants))
 	for entry := range preparedCh {
 		if acc, ok := cfg.GenesisAccounts[entry.addr]; ok && acc != nil {
 			acc.Root = entry.root
+		} else {
+			giantRoots[entry.addrHash] = entry.root
 		}
 		stats.StorageBytes += entry.storageBytes
 	}
 	if cause := context.Cause(drainCtx); cause != nil && cause != context.Canceled {
-		return cause
+		return nil, cause
 	}
-	return nil
+	return giantRoots, nil
 }
 
 func decodeEntity(blob []byte) entity {

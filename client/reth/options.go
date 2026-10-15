@@ -10,15 +10,26 @@ import (
 	"github.com/ethereum/state-actor/internal/entitygen"
 )
 
-// Options carries optional knobs for RunCgo. Reserved for future use; the
-// zero value is the supported default.
+// Options carries optional knobs for RunCgo. The zero value is the
+// supported default (fresh fill profile, dense everywhere).
 type Options struct {
-	// (No options exposed yet. Future candidates: bytecode-LRU capacity,
-	// commit-threshold override, scratch directory, etc.)
+	// FillProfileName is the resolved --mdbx-fill-profile name, recorded
+	// verbatim into the run manifest — RunCgo does not substitute "fresh"
+	// for an empty string. main.go's flag defaults to "fresh" and always
+	// passes it, so callers other than tests constructing a zero Options
+	// never hit that case.
+	FillProfileName string
+	// FillTargets maps MDBX table name (see FillTables) -> target leaf fill
+	// in (0.5, 1.0], resolved from FillProfileName + --mdbx-fill overrides
+	// via ResolveFillProfile. A table absent from the map stays dense
+	// (split_reserve=0). nil/empty means dense everywhere.
+	FillTargets map[string]float64
 }
 
 // buildAllocAccounts converts cfg.GenesisAccounts/Code/Storage into a
 // slice of *entitygen.Account suitable for reth's WriteContracts path.
+// Code comes from cfg.GenesisCode only: lazy code stays out, so the
+// caller makes it with cfg.CodeAt one batch at a time.
 // WriteContracts mutates each Account's StateAccount.Root + .CodeHash
 // from the supplied Storage + Code, so the per-account RLP captures the
 // correct global-state-trie values.

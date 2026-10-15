@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/trie"
 
 	"github.com/ethereum/state-actor/generator"
+	"github.com/ethereum/state-actor/internal/autofill"
 	"github.com/ethereum/state-actor/internal/streamingtrie"
 	"github.com/ethereum/state-actor/internal/streamsort"
 )
@@ -71,7 +72,14 @@ func writeStateAndCollectRoot(
 		hashToAddr[crypto.Keccak256Hash(addr[:])] = addr
 	}
 
-	if err := runPhase0(ctx, cfg, w); err != nil {
+	var giants []*autofill.Giant
+	if cfg.AutoFill != nil {
+		for k := range cfg.AutoFill.Giants {
+			giants = append(giants, cfg.AutoFill.Giant(cfg.Seed, k))
+		}
+	}
+	giantRoots, err := runPhase0(ctx, cfg, w, giants)
+	if err != nil {
 		return common.Hash{}, nil, err
 	}
 
@@ -87,10 +95,7 @@ func writeStateAndCollectRoot(
 		genesisAddrs[addr] = struct{}{}
 		addrHash := crypto.Keccak256Hash(addr[:])
 
-		var code []byte
-		if c, ok := cfg.GenesisCode[addr]; ok {
-			code = c
-		}
+		code := cfg.CodeAt(addr)
 		var slots []entityBlobSlot
 		if storage, ok := cfg.GenesisStorage[addr]; ok {
 			slots = make([]entityBlobSlot, 0, len(storage))
@@ -172,6 +177,15 @@ func writeStateAndCollectRoot(
 			cfg.Progress.Tick(int64(i+1), int64(plan.NumContracts),
 				fmt.Sprintf("contracts · %d slots", stats.StorageSlotsCreated))
 		}
+
+		// Giants' storage was written in Phase 0; only the account goes through the sorter.
+		for _, g := range giants {
+			if err := sorter.Put(g.AddrHash[:], encodeEntityContract(g.Nonce, g.Balance, g.Code, nil)); err != nil {
+				return common.Hash{}, nil, fmt.Errorf("phase1 giant %s: %w", g.Address.Hex(), err)
+			}
+			stats.ContractsCreated++
+			stats.StorageSlotsCreated += int(g.Slots)
+		}
 	}
 
 	stats.GenerationTime = time.Since(start)
@@ -238,6 +252,8 @@ func writeStateAndCollectRoot(
 					acc.Root != (common.Hash{}) {
 					storageRoot = acc.Root
 				}
+			} else if root, ok := giantRoots[addrHash]; ok {
+				storageRoot = root
 			}
 		}
 
@@ -540,43 +556,53 @@ func (g *gethStorageHashBuilder) Root() (common.Hash, error) {
 	return root, nil
 }
 
-// runPhase0 drives the spec-PreAlloc streaming-trie phase in parallel.
+// runPhase0 streams storage tries in parallel: spec-PreAlloc entities
+// (drained through a temp streamsort) and auto-fill giants (already
+// keccak-sorted, no temp store).
 //
-// For every cfg.PreAlloc entity with pe.Storage != nil, a worker:
-//  1. Drains the entity's storage iter into a per-call streamsort.Store
-//     (rooted under cfg.DBPath so the temp lives on the production
-//     filesystem, not the docker container's /tmp overlay).
-//  2. Iterates the sorted store, building a per-account storage MPT
-//     via a scratch-batch HashBuilder. Per-slot snapshot rows and
+// For every such account, a worker:
+//  1. Streams its slots in keccak order, building a per-account storage
+//     MPT via a scratch-batch HashBuilder. Per-slot snapshot rows and
 //     per-storage-trie-node writes go to the worker's own *pebble.Batch
 //     — no contention on the shared w.batch+batchMu hot path.
-//  3. Flushes its batch via w.CommitScratchBatch when it crosses
+//  2. Flushes its batch via w.CommitScratchBatch when it crosses
 //     scratchBatchFlushBytes, and one final flush at worker exit.
-//  4. Reports the computed storage root through preparedCh to the main
-//     goroutine, which assigns it to cfg.GenesisAccounts[addr].Root.
+//  3. Reports the computed storage root through preparedCh to the main
+//     goroutine, which assigns it to cfg.GenesisAccounts[addr].Root, or
+//     returns it keyed by addrHash for giants.
 //
 // Root assignment is single-writer on the main goroutine; workers
 // never touch cfg.GenesisAccounts. Across-entity Pebble keyspaces are
 // disjoint (every key is addrHash-prefixed), so parallel db.Apply
 // calls don't conflict at the storage layer; they coalesce in
 // Pebble's WAL pipeline.
-func runPhase0(ctx context.Context, cfg generator.Config, w *Writer) error {
-	indices := make([]int, 0, len(cfg.PreAlloc))
+func runPhase0(ctx context.Context, cfg generator.Config, w *Writer, giants []*autofill.Giant) (map[common.Hash]common.Hash, error) {
+	type streamed struct {
+		addr common.Address
+		root func(streamingtrie.HashBuilder, streamingtrie.Sink) (common.Hash, error)
+	}
+	var items []streamed
 	for i := range cfg.PreAlloc {
-		if cfg.PreAlloc[i].Storage != nil {
-			indices = append(indices, i)
+		if pe := &cfg.PreAlloc[i]; pe.Storage != nil {
+			items = append(items, streamed{pe.Address, func(hb streamingtrie.HashBuilder, sink streamingtrie.Sink) (common.Hash, error) {
+				return streamingtrie.StorageRoot(cfg.DBPath, pe.Storage, hb, sink)
+			}})
 		}
 	}
-	if len(indices) == 0 {
-		return nil
+	for _, g := range giants {
+		items = append(items, streamed{g.Address, func(hb streamingtrie.HashBuilder, sink streamingtrie.Sink) (common.Hash, error) {
+			return streamingtrie.SortedRoot(g.Sorted, hb, sink)
+		}})
+	}
+	if len(items) == 0 {
+		return nil, nil
 	}
 
-	// Phase 0 streams each spec entity's storage slots (100M–1B per bloat
-	// entity) and is otherwise silent for hours. The count-only slot heartbeat
-	// funnels every worker's per-slot count through one SlotMeter; each worker
-	// holds its own SlotWorker so the hot per-slot path stays cheap (one
-	// non-atomic add + mask).
-	cfg.Progress.Stage("geth: phase 0 — spec storage")
+	// Phase 0 streams 1M–1B slots per account and is otherwise silent for
+	// hours. The count-only slot heartbeat funnels every worker's per-slot
+	// count through one SlotMeter; each worker holds its own SlotWorker so
+	// the hot per-slot path stays cheap (one non-atomic add + mask).
+	cfg.Progress.Stage("geth: phase 0 — streamed storage")
 	slotMeter := cfg.Progress.SlotMeter()
 
 	workers := runtime.NumCPU()
@@ -586,14 +612,14 @@ func runPhase0(ctx context.Context, cfg generator.Config, w *Writer) error {
 	if workers > maxPhase0Workers {
 		workers = maxPhase0Workers
 	}
-	if workers > len(indices) {
-		workers = len(indices)
+	if workers > len(items) {
+		workers = len(items)
 	}
 
 	type preparedEntity struct {
-		idx  int
-		addr common.Address
-		root common.Hash
+		addr     common.Address
+		addrHash common.Hash
+		root     common.Hash
 	}
 
 	drainCtx, cancelDrain := context.WithCancelCause(ctx)
@@ -619,15 +645,8 @@ func runPhase0(ctx context.Context, cfg generator.Config, w *Writer) error {
 				if drainCtx.Err() != nil {
 					return
 				}
-				pe := &cfg.PreAlloc[i]
-				addr := pe.Address
-				addrHash := crypto.Keccak256Hash(addr[:])
-
-				d, err := streamingtrie.Drain(cfg.DBPath, pe.Storage)
-				if err != nil {
-					cancelDrain(fmt.Errorf("geth: drain spec storage[%d] %s: %w", i, addr.Hex(), err))
-					return
-				}
+				it := items[i]
+				addrHash := crypto.Keccak256Hash(it.addr[:])
 				sink := func(keyHash, _rawKey, value common.Hash) error {
 					slotW.Slot()
 					valueRLP, encErr := encodeStorageValue(value)
@@ -638,14 +657,13 @@ func runPhase0(ctx context.Context, cfg generator.Config, w *Writer) error {
 					return sbw.Set(key, valueRLP)
 				}
 				hb := newScratchGethStorageHashBuilder(sbw, addrHash)
-				root, err := d.IterateRoot(hb, sink)
-				d.Close()
+				root, err := it.root(hb, sink)
 				if err != nil {
-					cancelDrain(fmt.Errorf("geth: iterate spec storage[%d] %s: %w", i, addr.Hex(), err))
+					cancelDrain(fmt.Errorf("geth: phase0 storage %s: %w", it.addr.Hex(), err))
 					return
 				}
 				select {
-				case preparedCh <- preparedEntity{idx: i, addr: addr, root: root}:
+				case preparedCh <- preparedEntity{addr: it.addr, addrHash: addrHash, root: root}:
 				case <-drainCtx.Done():
 					return
 				}
@@ -655,7 +673,7 @@ func runPhase0(ctx context.Context, cfg generator.Config, w *Writer) error {
 
 	go func() {
 		defer close(drainCh)
-		for _, i := range indices {
+		for i := range items {
 			select {
 			case drainCh <- i:
 			case <-drainCtx.Done():
@@ -669,13 +687,16 @@ func runPhase0(ctx context.Context, cfg generator.Config, w *Writer) error {
 		close(preparedCh)
 	}()
 
+	giantRoots := make(map[common.Hash]common.Hash, len(giants))
 	for entry := range preparedCh {
 		if acc, ok := cfg.GenesisAccounts[entry.addr]; ok && acc != nil {
 			acc.Root = entry.root
+		} else {
+			giantRoots[entry.addrHash] = entry.root
 		}
 	}
 	if cause := context.Cause(drainCtx); cause != nil && cause != context.Canceled {
-		return cause
+		return nil, cause
 	}
-	return nil
+	return giantRoots, nil
 }

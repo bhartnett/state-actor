@@ -65,10 +65,10 @@ func ComputeStateRoot(accounts []*entitygen.Account, emit iReth.NodeEmitter) (co
 // emit is the per-branch-node callback:
 //   - nil → compute-only mode (back-compat for callers that only want the
 //     root hash; no trie-table persistence).
-//   - non-nil → full-emissions mode: every branch with RLP ≥ 32 bytes is
-//     forwarded to emit in lexicographic path order. The caller is expected
-//     to persist these into reth's AccountsTrie table (via MDBX
-//     cursor.Append for the sequential-write fast-path).
+//   - non-nil → every branch node stored iff tree_mask | hash_mask != 0
+//     (alloy_trie's store_branch_node rule — same rule reth's own genesis
+//     init uses) is forwarded to emit; see HashBuilder's "Path emission
+//     order" doc for ordering and persistence requirements.
 //
 // Without persisted AccountsTrie rows, reth's payload-builder state-root
 // computation falls back to a linear walk of HashedAccounts (and
@@ -98,17 +98,17 @@ func ComputeStateRootStreaming(iter func(yield func(addrHash, accountRLP []byte)
 }
 
 // newAccountTrieBuilder returns a HashBuilder configured for the account
-// trie. nil emit selects the alloy_trie-compatible constructor (compute-
-// only, no on-disk emissions). A non-nil emit selects the
-// full-emissions constructor so every ≥32-byte branch is persisted to
-// AccountsTrie via the caller's MDBX cursor write.
+// trie. A nil emit is replaced with a no-op callback (compute-only, no
+// trie-table persistence); a non-nil emit is passed straight to
+// iReth.NewHashBuilder — see its docstring for the store_branch_node
+// emission rule.
 func newAccountTrieBuilder(emit iReth.NodeEmitter) *iReth.HashBuilder {
 	if emit == nil {
-		return iReth.NewHashBuilder(func(iReth.StoredNibbles, iReth.BranchNodeCompact) error {
+		emit = func(iReth.StoredNibbles, iReth.BranchNodeCompact) error {
 			return nil
-		})
+		}
 	}
-	return iReth.NewHashBuilderFullEmissions(emit)
+	return iReth.NewHashBuilder(emit)
 }
 
 // sortAccountsByAddrHash sorts in place by AddrHash ascending.

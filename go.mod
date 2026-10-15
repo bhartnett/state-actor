@@ -8,11 +8,9 @@ require (
 	github.com/erigontech/mdbx-go v0.40.1
 	github.com/ethereum/go-ethereum v1.17.2-0.20260323171428-745b0a8c09ad
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/holiman/bloomfilter/v2 v2.0.3
 	github.com/holiman/uint256 v1.3.3-0.20260228135838-087f4b32f234
 	github.com/linxGnu/grocksdb v1.10.8
 	github.com/pierrec/lz4/v4 v4.1.22
-	github.com/spaolacci/murmur3 v1.1.0
 	golang.org/x/crypto v0.52.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -102,4 +100,6 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
+// Erigon's existence filter (db/datastruct/existence) builds against this fork. A dependency's
+// replace directives don't apply, so the Erigon image build relies on this copy of Erigon's.
 replace github.com/holiman/bloomfilter/v2 => github.com/AskAlexSharov/bloomfilter/v2 v2.0.9

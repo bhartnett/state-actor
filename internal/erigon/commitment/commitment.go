@@ -260,8 +260,8 @@ func ComputeGenesisRoot(inputStores []*streamsort.Store, tmpDir string, keying I
 	if keying == KeyingHashed && directEnabled() {
 		return ComputeGenesisRootDirect(inputStores, tmpDir)
 	}
-	// Live read-write branch sink shared by all 16 nibble-disjoint workers
-	// + the root ctx. Replaces the in-memory mergedBranches map. Created
+	// Live read-write branch sink shared by every fold worker + the root
+	// ctx. Replaces the in-memory mergedBranches map. Created
 	// under tmpDir (real disk). On success, OWNERSHIP TRANSFERS to the
 	// returned Result (Result.BranchIterate streams it into the commitment
 	// .kv writer; Result.CloseBranches releases it) — closed here only on
@@ -278,9 +278,10 @@ func ComputeGenesisRoot(inputStores []*streamsort.Store, tmpDir string, keying I
 	}()
 
 	// factory yields a subtreeCtx bound to the SHARED live branch store.
-	// Workers write disjoint first-nibble prefixes, so concurrent PutBranch
-	// (pebble Set) has no key-overwrite hazard and needs no per-worker merge.
-	factory := func() (erigoncommitment.PatriciaContext, func()) {
+	// Each branch prefix is written by exactly one fold, so concurrent
+	// PutBranch (pebble Set) has no key-overwrite hazard and needs no
+	// per-worker merge.
+	factory := func(context.Context) (erigoncommitment.PatriciaContext, func()) {
 		sc := &subtreeCtx{inputStores: inputStores, branches: branches, keying: keying, getterPart: -1}
 		return sc, func() {
 			if sc.getter != nil {
@@ -289,53 +290,51 @@ func ComputeGenesisRoot(inputStores []*streamsort.Store, tmpDir string, keying I
 		}
 	}
 
-	// rootCtx shares the same store; the root-level PutBranch from foldBranch
-	// (and the ApplyAndClearInlineDeferredUpdates flush below) lands in it.
-	// Its closeFn releases the getter it may have bound (hashed keying).
-	rootCtx, rootCtxClose := factory()
+	// rootCtx shares the same store; the root trie's reads and branch
+	// writes land in it. Its closeFn releases the getter it may have bound
+	// (hashed keying).
+	rootCtx, rootCtxClose := factory(context.Background())
 	defer rootCtxClose()
 
-	hph := erigoncommitment.NewHexPatriciaHashed(20 /* accountKeyLen */, rootCtx)
-	pph := erigoncommitment.NewConcurrentPatriciaHashed(hph, rootCtx)
-	defer pph.Close()
+	// The engine Erigon runs with parallel commitment on: workers fold
+	// subtrees from leased factory contexts, then Process applies every
+	// deferred branch write (root included) before it returns.
+	trieCfg := erigoncommitment.DefaultTrieConfig()
+	trieCfg.Variant = erigoncommitment.VariantParallelHexPatricia
+	pph := erigoncommitment.NewParallelPatriciaHashed(factory, 20 /* accountKeyLen */, trieCfg)
+	defer pph.Release()
+	pph.ResetContext(rootCtx)
 
-	// Single-shot engine: Touch every key into ONE Updates, then one
-	// concurrent 16-way Process. ModeDirect TouchPlainKeyDirect records
-	// (hashedKey, plainKey) into the per-nibble etl collector + dedup map;
-	// the *Update arg is discarded (HPH re-fetches via ctx.Account/Storage).
-	// The dedup map is O(total-keys) in RAM — fine for the oracle/fallback
-	// scale this path serves; the default DDF path above has no such map.
-	upds := erigoncommitment.NewUpdates(erigoncommitment.ModeDirect, tmpDir, erigoncommitment.KeyToHexNibbleHash)
-	upds.SetConcurrentCommitment(true) // ParallelHashSort needs ModeDirect + sortPerNibble
-	var placeholder erigoncommitment.Update
+	// Single-shot engine: Touch every key, with its decoded Update, into ONE
+	// ModeParallel Updates, then one Process. The key map and prefix trie
+	// are O(total-keys) in RAM — fine for the oracle/fallback scale this
+	// path serves; the default DDF path above has no such structures.
+	upds := erigoncommitment.NewUpdates(erigoncommitment.ModeParallel, tmpDir, erigoncommitment.KeyToHexNibbleHash)
+	defer upds.Close()
 	for i := range inputStores {
 		if err := inputStores[i].Iterate(func(k, v []byte) error {
 			// KeyingHashed stores are keyed by the hashed key; the plain key
-			// TouchPlainKeyDirect needs travels in the row value.
+			// travels in the row value.
+			plainKey, updateBytes := k, v
 			if keying == KeyingHashed {
-				plainKey, _, e := DecodeInputRow(v)
-				if e != nil {
+				var e error
+				if plainKey, updateBytes, e = DecodeInputRow(v); e != nil {
 					return fmt.Errorf("decode input row: %w", e)
 				}
-				upds.TouchPlainKeyDirect(string(plainKey), &placeholder)
-			} else {
-				upds.TouchPlainKeyDirect(string(k), &placeholder)
 			}
+			var u erigoncommitment.Update
+			if _, e := u.Decode(updateBytes, 0); e != nil {
+				return fmt.Errorf("decode update %x: %w", plainKey, e)
+			}
+			upds.TouchPlainKeyDirect(string(plainKey), &u)
 			return nil
 		}); err != nil {
 			return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: store %d: %w", i, err)
 		}
 	}
-	rootBytes, err := pph.Process(context.Background(), upds, "state-actor-genesis", nil,
-		erigoncommitment.WarmupConfig{CtxFactory: factory})
+	rootBytes, err := pph.Process(context.Background(), upds, "state-actor-genesis", nil, erigoncommitment.WarmupConfig{})
 	if err != nil {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: Process: %w", err)
-	}
-	// ParallelHashSort returns rootHash WITHOUT flushing the root's deferred
-	// branch (SpawnSubTrie disables defer only for the per-nibble mounts) —
-	// flush it into the live store here. (hph == pph.RootTrie().)
-	if err := hph.ApplyAndClearInlineDeferredUpdates(); err != nil {
-		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: ApplyAndClearInlineDeferredUpdates: %w", err)
 	}
 
 	if len(rootBytes) != 32 {
@@ -345,8 +344,7 @@ func ComputeGenesisRoot(inputStores []*streamsort.Store, tmpDir string, keying I
 	copy(root[:], rootBytes)
 
 	// HPHState comes from the root trie after all subtrees have folded
-	// back into root.grid[0]. RootTrie() returns the same root HPH we
-	// constructed above.
+	// back into its root cell.
 	hphState, err := pph.RootTrie().EncodeCurrentState(nil)
 	if err != nil {
 		return Result{}, fmt.Errorf("commitment.ComputeGenesisRoot: EncodeCurrentState: %w", err)
@@ -442,14 +440,12 @@ func ComputeGenesisRootFromAccountsKeyed(accounts []Account, keying InputKeying)
 }
 
 // subtreeCtx implements erigoncommitment.PatriciaContext for the ENGINE
-// fallback: one per ParallelHashSort worker (+ the root HPH), all sharing
-// the live branch store. Workers write disjoint first-nibble prefixes, so
+// fallback: one per leased fold worker (+ the root trie), all sharing the
+// live branch store. Each branch prefix is written by exactly one fold, so
 // concurrent PutBranch/Branch are safe with no overwrite ambiguity.
 type subtreeCtx struct {
 	// inputStores is the 16 nibble-partitioned commitment-input sub-stores,
-	// keyed per `keying`. Account/Storage route by InputPart(plainKey); a
-	// concurrent worker only ever hits one part, so its Pebble cache is
-	// uncontended.
+	// keyed per `keying`. Account/Storage route by InputPart(plainKey).
 	inputStores []*streamsort.Store
 	branches    *branchStore
 	keying      InputKeying
@@ -457,8 +453,8 @@ type subtreeCtx struct {
 	// sub-store — the KeyingHashed fast path (a 16-way worker reads its
 	// nibble in hashed-sorted order, so SeekGE stays in-file, skipping the
 	// per-Get iterator build). getterPart tracks its binding: -1 = none yet,
-	// 0..15 = bound, -2 = retired (a nibble-spanning ctx — the root/serial
-	// engine — falls back to db.Get). Closed by the factory's closeFn.
+	// 0..15 = bound, -2 = retired (a ctx that crosses nibbles falls back to
+	// db.Get). Closed by the factory's closeFn.
 	getter     *streamsort.Getter
 	getterPart int
 }

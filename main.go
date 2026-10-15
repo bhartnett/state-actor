@@ -52,6 +52,8 @@ var (
 	targetSize = flag.String("target-size", "", "Advisory budget (e.g. '5GB', '500MB') that sizes the auto-fill of 20/10/70 mainnet-shaped synthetic state. Required unless --spec is set. With --spec, fills the headroom after the spec's projected cost; if the spec already meets the target, no auto-fill runs. Not a hard on-disk cap — actual size may vary per client. Honored by geth, besu, nethermind, reth, ethrex, erigon, and nimbus.")
 
 	autofillProfile = flag.String("autofill-profile", "mainnet", "Auto-fill byte-split profile: 'mainnet' (20/10/70 account/code/storage, default) or 'accounts' (account-trie only — all EOAs, no contracts/storage). 'accounts' generates account-dominated tries for low-memory big-trie validation; it stays on the streaming DrawEOA path, so all clients must use the same value + --seed for cross-client state-root invariance.")
+	storageModel    = flag.String("storage-model", "normal", "Auto-fill contract storage: 'normal' (default: every contract ~35 KiB of 32-byte random values) or 'mainnet' (slot counts and value lengths calibrated on a mainnet-derived reth store: most contracts hold 1-3 slots, values are compact, and contracts above 1M slots follow a power law with no cap; the contract count follows from the storage budget). Changes the state root; all clients must use the same value + --seed for cross-client state-root invariance. Not supported with --binary-trie.")
+	accountModel    = flag.String("account-model", "normal", "Auto-fill account shape: 'normal' (default) or 'mainnet' (class, nonce/balance size and storage-less contract code drawn from a mainnet-derived reth store's account census; storage accounts take its nonce/balance shape). Changes the state root; all clients must use the same value + --seed for cross-client state-root invariance. Not supported with --binary-trie.")
 
 	fork      = flag.String("fork", "", "Hard fork active at genesis. Empty (default) resolves to the latest fork the chosen --client can write. Use --list-forks to see all values.")
 	listForks = flag.Bool("list-forks", false, "Print the list of accepted --fork values and exit.")
@@ -70,6 +72,11 @@ var (
 		"  reth: writes StoragesHistory + AccountsHistory + StorageChangeSets + AccountChangeSets at genesis.\n"+
 		"  geth: writes PathDB archive-anchor metadata for --gcmode=archive boots.\n"+
 		"Rejected for besu, nethermind, and nimbus (no archive code path).")
+
+	mdbxFillProfile = flag.String("mdbx-fill-profile", "fresh", "reth only: MDBX B-tree page-fill profile — 'fresh' (dense, default), 'migrated', or 'aged'. "+
+		"Sets MDBX_opt_split_reserve per table so the generated store reproduces a reference node's page fill. Rejected for clients other than reth.")
+	mdbxFill = flag.String("mdbx-fill", "", "reth only: per-table fill overrides on top of --mdbx-fill-profile, e.g. 'HashedAccounts=0.59,HashedStorages=0.70'. "+
+		"Valid tables: HashedAccounts, AccountsTrie, HashedStorages, StoragesTrie, Bytecodes. Values must be in (0.5, 1.0]. Rejected for clients other than reth.")
 )
 
 func main() {
@@ -144,10 +151,26 @@ func generate(reproducedFrom string) *generator.Stats {
 		*seed = time.Now().UnixNano()
 	}
 
+	// --mdbx-fill-profile / --mdbx-fill syntax (unknown profile name, bad
+	// Table=fill overrides) is checked here regardless of --client; the
+	// reth-only gate lives in clientpolicy.ValidateForClient.
+	mdbxFillOverrides, err := reth.ParseFillOverrides(*mdbxFill)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	mdbxFillTargets, err := reth.ResolveFillProfile(*mdbxFillProfile, mdbxFillOverrides)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
 	if err := clientpolicy.ValidateForClient(*client, clientpolicy.FlagValues{
-		BinaryTrie: *binaryTrie,
-		TargetSize: *targetSize,
-		Fork:       *fork,
+		BinaryTrie:         *binaryTrie,
+		TargetSize:         *targetSize,
+		Fork:               *fork,
+		MdbxFillProfile:    *mdbxFillProfile,
+		MdbxFillOverridden: len(mdbxFillOverrides) > 0,
+		StorageModel:       *storageModel,
+		AccountModel:       *accountModel,
 	}); err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -270,8 +293,15 @@ func generate(reproducedFrom string) *generator.Stats {
 			if err != nil {
 				log.Fatalf("auto-fill: %v", err)
 			}
-			plan, err := autofill.PlanForBudgetProfile(topUp, profile)
+			model, err := autofill.ParseStorageModel(*storageModel)
 			if err != nil {
+				log.Fatalf("auto-fill: %v", err)
+			}
+			plan, err := autofill.PlanForBudgetProfile(topUp, profile, model)
+			if err != nil {
+				log.Fatalf("auto-fill: %v", err)
+			}
+			if plan.AccountModel, err = autofill.ParseAccountModel(*accountModel); err != nil {
 				log.Fatalf("auto-fill: %v", err)
 			}
 			config.AutoFill = plan
@@ -299,8 +329,8 @@ func generate(reproducedFrom string) *generator.Stats {
 			log.Printf("  Target Size:  %s", formatBytes(config.TargetSize))
 		}
 		if config.AutoFill != nil {
-			log.Printf("  Auto-fill:    %d EOAs / %d contracts (mainnet 20/10/70)",
-				config.AutoFill.NumEOAs, config.AutoFill.NumContracts)
+			log.Printf("  Auto-fill:    %d EOAs / %d contracts / %d giants (mainnet 20/10/70)",
+				config.AutoFill.NumEOAs, config.AutoFill.NumContracts, config.AutoFill.Giants)
 		}
 		log.Printf("  Fork:         %s", chosenFork)
 		log.Printf("  Chain ID:     %d", *chainID)
@@ -367,7 +397,10 @@ func generate(reproducedFrom string) *generator.Stats {
 
 	case "reth":
 		var err error
-		stats, err = reth.RunCgo(context.Background(), config, reth.Options{})
+		stats, err = reth.RunCgo(context.Background(), config, reth.Options{
+			FillProfileName: *mdbxFillProfile,
+			FillTargets:     mdbxFillTargets,
+		})
 		if err != nil {
 			log.Fatalf("Failed to populate Reth DB: %v", err)
 		}
@@ -450,21 +483,25 @@ func generate(reproducedFrom string) *generator.Stats {
 		GeneratedAt:   start.UTC().Format(time.RFC3339),
 		Command:       os.Args,
 		Flags: manifest.Flags{
-			Client:     *client,
-			DB:         *dbPath,
-			Seed:       *seed,
-			SeedInput:  seedInput,
-			Fork:       chosenFork,
-			ForkInput:  *fork,
-			ChainID:    *chainID,
-			GasLimit:   *gasLimit,
-			Timestamp:  *timestamp,
-			ExtraData:  *extraData,
-			TargetSize: *targetSize,
-			BinaryTrie: *binaryTrie,
-			GroupDepth: *groupDepth,
-			Archive:    *archive,
-			SpecPath:   *specFile,
+			Client:          *client,
+			DB:              *dbPath,
+			Seed:            *seed,
+			SeedInput:       seedInput,
+			Fork:            chosenFork,
+			ForkInput:       *fork,
+			ChainID:         *chainID,
+			GasLimit:        *gasLimit,
+			Timestamp:       *timestamp,
+			ExtraData:       *extraData,
+			TargetSize:      *targetSize,
+			BinaryTrie:      *binaryTrie,
+			GroupDepth:      *groupDepth,
+			Archive:         *archive,
+			SpecPath:        *specFile,
+			MdbxFillProfile: *mdbxFillProfile,
+			MdbxFill:        *mdbxFill,
+			StorageModel:    *storageModel,
+			AccountModel:    *accountModel,
 		},
 		Spec: specFileEntry,
 		Result: &manifest.Result{
@@ -474,6 +511,7 @@ func generate(reproducedFrom string) *generator.Stats {
 			StorageSlots:     uint64(stats.StorageSlotsCreated),
 			ElapsedMS:        elapsed.Milliseconds(),
 			Composition:      compositionFromPlan(config.AutoFill),
+			MdbxFill:         stats.MdbxFill,
 		},
 		ReproducedFrom: reproducedFrom,
 	}
@@ -529,6 +567,8 @@ func compositionFromPlan(plan *autofill.Plan) *manifest.Composition {
 		NumContracts:      plan.NumContracts,
 		DelegationRate:    plan.EOAFlavors.HasDelegation,
 		DistinctBytecodes: plan.DistinctBytecodes,
+		Giants:            plan.Giants,
+		GiantSlots:        plan.GiantSlots,
 	}
 }
 
@@ -598,6 +638,22 @@ func reproduce(args []string) {
 	*binaryTrie = m.Flags.BinaryTrie
 	*groupDepth = m.Flags.GroupDepth
 	*archive = m.Flags.Archive
+	// MdbxFillProfile is empty in manifests from before --mdbx-fill-profile
+	// existed; "fresh" is that era's only behavior.
+	*mdbxFillProfile = m.Flags.MdbxFillProfile
+	if *mdbxFillProfile == "" {
+		*mdbxFillProfile = "fresh"
+	}
+	*mdbxFill = m.Flags.MdbxFill
+	// Empty in manifests from before --storage-model existed; "normal" is that era's only behavior.
+	*storageModel = m.Flags.StorageModel
+	if *storageModel == "" {
+		*storageModel = "normal"
+	}
+	*accountModel = m.Flags.AccountModel
+	if *accountModel == "" {
+		*accountModel = "normal"
+	}
 	*dbPath = *outDB
 
 	// Reproduce from the content-addressed spec sidecar next to the manifest —

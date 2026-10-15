@@ -1,4 +1,4 @@
-// Vendored from github.com/erigontech/erigon execution/commitment/commitment.go @ 14273f79a6 (production pin).
+// Vendored from github.com/erigontech/erigon execution/commitment/commitment.go @ 14273f79a6 (prior pin; Golden A checks it against the current pin's engine).
 // Modifications: package commitment -> hph; build tag; nibbles import rewrite; R2+R3 strips: ReplacePlainKeys/MergeHexBranches/Validate+helpers/BranchStat/DecodeBranchAndCollectStat/ParseTrieVariant/PendingCommitmentUpdate/Touch{PlainKey,HashedKey,Account,Storage,Code}/NewEmpty/SetMode/Mode/PlainKeys/keyHasherNoop/GetDeferredUpdateMetrics (+ crypto/accounts/keccak/slices/nibbles imports); R3: Updates core (NewUpdates/TouchPlainKeyDirect/HashSort/arena/Mode/KeyUpdate/keyHasher), Trie interface + TrieVariant + InitializeTrieAndUpdates, CommitProgress, Update.Copy, BranchEncoder warmup-cache field/branches, levelled metric arrays
 //
 //go:build cgo_erigon_commitment

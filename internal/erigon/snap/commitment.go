@@ -26,8 +26,8 @@ var KeyCommitmentState = []byte("state")
 // consumes each row synchronously before requesting the next.
 type BranchStream func(yield func(prefix, data []byte) error) error
 
-// WriteCommitment emits the Commitment-domain snapshot file set
-// (commitment.<from>-<to>.kv + .kvi + .kvei) for the given step range
+// WriteCommitment emits the Commitment-domain snapshot file set (the
+// .kv and the accessors Erigon's schema lists) for the given step range
 // from a sorted stream of HPH branch rows. The KeyCommitmentState record
 // is spliced into the stream at its sort position (a 1-key 2-way merge) —
 // the caller does NOT pre-insert it. This consumes the branch rows
@@ -41,8 +41,8 @@ type BranchStream func(yield func(prefix, data []byte) error) error
 // state-actor commitment package for the encoder.
 //
 // `branchCount` is the number of rows `branches` will yield.
-// WriteCommitment passes `branchCount+1` to WriteDomain so the bloom +
-// recsplit sizing accounts for the spliced KeyCommitmentState record.
+// WriteCommitment passes `branchCount+1` to WriteDomain to count the
+// spliced KeyCommitmentState record.
 //
 // In the astronomically unlikely event a branch prefix collides with
 // KeyCommitmentState ("state" is a valid 5-byte key shape), WriteCommitment
@@ -50,11 +50,6 @@ type BranchStream func(yield func(prefix, data []byte) error) error
 // Put would have silently dropped the colliding branch row — a corrupt
 // commitment snapshot with a desynced keyCount; erroring is strictly
 // better for a ~2^-40 event.)
-//
-// The commitment domain's default AccessorMask
-// (AccessorHashMap | AccessorExistence per state_schema.go:261) is used
-// — no AccessorBTree. WriteDomain emits .kvi (RecSplit MPHF) and .kvei
-// (existence bloom) sidecars.
 func WriteCommitment(
 	ctx context.Context,
 	w *Writer,
@@ -72,11 +67,9 @@ func WriteCommitment(
 	// build a silently-short .kv (the bug class this repo bans).
 	var streamErr error
 	entries := func(yield func(DomainEntry) bool) {
-		// Per-invocation state: WriteDomain drives entries TWICE
-		// (CompressFromSource count + encode passes) — declared inside so
-		// each pass re-splices the state row and re-arms the ascending
-		// assert; hoisting these would silently drop the state row from
-		// pass 2.
+		// Per-invocation state, so each iteration of entries re-splices
+		// the state row and re-arms the ascending assert; hoisting these
+		// would silently drop the state row from a second pass.
 		stateEmitted := false
 		var prevPrefix []byte
 		streamErr = branches(func(prefix, data []byte) error {

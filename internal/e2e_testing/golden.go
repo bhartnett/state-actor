@@ -34,12 +34,47 @@ func GoldenStateRootCfg(dbPath string) generator.Config {
 	}
 }
 
+// GoldenGiantRoot is the state root of GoldenGiantRootCfg on every MPT client.
+var GoldenGiantRoot = common.HexToHash("0xfb4f8deccd5dbb6fb27ca77f972504112e3e653793cb66aea7268a73de44ce7d")
+
+// GoldenGiantRootCfg is GoldenStateRootCfg under --storage-model=mainnet and
+// --account-model=mainnet plus one 1M-slot giant, so every writer's
+// mainnet-model paths are held to one root.
+func GoldenGiantRootCfg(dbPath string) generator.Config {
+	plan, err := autofill.PlanForBudgetProfile(GoldenTestBudget, autofill.ProfileMainnet, autofill.StorageMainnet)
+	if err != nil {
+		panic("e2e_testing: PlanForBudgetProfile for GoldenTestBudget should never error: " + err.Error())
+	}
+	plan.Giants = 1
+	if plan.AccountModel, err = autofill.ParseAccountModel("mainnet"); err != nil {
+		panic("e2e_testing: ParseAccountModel(mainnet): " + err.Error())
+	}
+	return generator.Config{
+		DBPath:   dbPath,
+		AutoFill: plan,
+		Seed:     12345,
+	}
+}
+
 // AssertGoldenStateRoot adds the 4 canonical EIP system contracts to cfg,
 // invokes runFn, and asserts the produced state root equals
 // entitygen.CanonicalOsakaMPTRoot. Drift requires a coordinated update of
 // CanonicalOsakaMPTRoot + every caller + internal/entitygen/canonical_mpt_test.go.
 func AssertGoldenStateRoot(t *testing.T, clientName string, cfg generator.Config,
 	runFn func(context.Context, generator.Config) (*generator.Stats, error)) {
+	t.Helper()
+	assertRoot(t, clientName, cfg, runFn, entitygen.CanonicalOsakaMPTRoot)
+}
+
+// AssertGoldenGiantRoot is AssertGoldenStateRoot for GoldenGiantRootCfg.
+func AssertGoldenGiantRoot(t *testing.T, clientName string, cfg generator.Config,
+	runFn func(context.Context, generator.Config) (*generator.Stats, error)) {
+	t.Helper()
+	assertRoot(t, clientName, cfg, runFn, GoldenGiantRoot)
+}
+
+func assertRoot(t *testing.T, clientName string, cfg generator.Config,
+	runFn func(context.Context, generator.Config) (*generator.Stats, error), wantRoot common.Hash) {
 	t.Helper()
 	syscontracts.AddCanonicalSystemContracts(&cfg)
 
@@ -53,9 +88,9 @@ func AssertGoldenStateRoot(t *testing.T, clientName string, cfg generator.Config
 	if stats.StateRoot == (common.Hash{}) {
 		t.Fatalf("%s run returned zero state root", clientName)
 	}
-	want := entitygen.CanonicalOsakaMPTRoot.Hex()
+	want := wantRoot.Hex()
 	if got := stats.StateRoot.Hex(); got != want {
-		t.Fatalf("%s golden state root mismatch:\n  got:  %s\n  want: %s\n  Drift requires coordinated update of entitygen.CanonicalOsakaMPTRoot + all 4 client goldens + internal/entitygen/canonical_mpt_test.go.",
+		t.Fatalf("%s golden state root mismatch:\n  got:  %s\n  want: %s\n  Drift requires coordinated update of the golden root (entitygen.CanonicalOsakaMPTRoot or GoldenGiantRoot) + every client golden.",
 			clientName, got, want)
 	}
 }

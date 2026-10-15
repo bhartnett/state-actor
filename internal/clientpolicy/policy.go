@@ -24,6 +24,12 @@ type FlagValues struct {
 	BinaryTrie bool   // --binary-trie
 	TargetSize string // --target-size (non-empty means active)
 	Fork       string // --fork (canonical fork name; "" means "auto")
+
+	MdbxFillProfile    string // --mdbx-fill-profile (non-"fresh" means active)
+	MdbxFillOverridden bool   // --mdbx-fill has at least one Table=fill override
+
+	StorageModel string // --storage-model
+	AccountModel string // --account-model
 }
 
 // ValidateForClient returns nil when every flag in fv is compatible with
@@ -61,6 +67,20 @@ func ValidateForClient(client string, fv FlagValues) error {
 		case "nimbus":
 			return fmt.Errorf("--binary-trie is not supported with --client=nimbus (Nimbus does not implement EIP-7864)")
 		}
+	}
+
+	// The binary-trie generator writes no giants (the contracts --storage-model=mainnet streams)
+	// and the mainnet account model is untested there.
+	if fv.BinaryTrie && (fv.StorageModel == "mainnet" || fv.AccountModel == "mainnet") {
+		return fmt.Errorf("--storage-model=mainnet and --account-model=mainnet are not supported with --binary-trie")
+	}
+
+	// --mdbx-fill-profile / --mdbx-fill — reth-only: every other client
+	// writes through a different store (or none) that split_reserve/
+	// prefer_waf_insteadof_balance don't apply to. "" (zero value, same as
+	// unset) and "fresh" are both the inactive/default profile.
+	if client != "reth" && ((fv.MdbxFillProfile != "" && fv.MdbxFillProfile != "fresh") || fv.MdbxFillOverridden) {
+		return fmt.Errorf("--mdbx-fill-profile/--mdbx-fill are only supported with --client=reth; got --client=%s", client)
 	}
 
 	// Per-client fork ceiling. Empty means "auto"; the caller resolves

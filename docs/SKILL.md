@@ -26,7 +26,7 @@ Read these in this order. The first one is load-bearing — read it before you r
 | `--spec` | Path to a YAML file declaring concrete entities (EOAs, contracts, ERC-20s, EIP-7702 delegations) |
 | `--target-size` | Advisory budget that sizes the auto-fill of synthetic state. Not a hard on-disk cap — actual size may vary per client. |
 
-Everything else has a sane default. Run `state-actor --help` for the full list (22 flags).
+Everything else has a sane default. Run `state-actor --help` for the full list.
 
 ## Canonical spec reference
 
@@ -165,6 +165,7 @@ The cross-client genesis-root invariant says: same `--seed`, same spec, same cli
 - **`--seed=0` is a footgun**: `main.go` rewrites it to `time.Now().UnixNano()`, i.e. randomises. For determinism use any non-zero seed. Bench convention is `--seed=42`.
 - **`--target-size` is required when `--spec` is not set**: drives the mainnet-shaped auto-fill (20 % account-trie / 10 % bytecode / 70 % storage) over the whole budget. With `--spec`, spec entities count first; the auto-fill fills the headroom on top. If the spec alone exceeds the budget, `internal/specbuild` truncates the entity list to the longest prefix that fits and emits a `--target-size … truncated spec at entity[N]` warning to stderr; no auto-fill runs in that case.
 - **`--archive` is geth/reth only**: rejected for besu, nethermind, ethrex, and nimbus; accepted but a no-op for erigon.
+- **`--mdbx-fill-profile` / `--mdbx-fill` are reth-only**: rejected for every other client.
 - **`--binary-trie` is geth-only** (EIP-7864).
 - **When using `--spec` alone, omit `--target-size`** — that way no auto-fill runs on top and random EOAs can't collide with spec-derived addresses. Set both only when you want the auto-fill to pad the headroom.
 - **Nethermind boot needs a JSON `boot.cfg`** pointing at the chainspec + datadir (see `client/nethermind/e2e_test.go`'s `nethermindE2EConfigTemplate`). The other clients accept boot flags directly.

@@ -15,6 +15,79 @@
   first build carrying the current on-disk format.
 
 ### Changed
+- **reth: StoragesTrie is written in addrHash order across contracts.** Rows
+  were `Put` in contract generation order, so each contract's main key
+  (keccak(address)) landed at a random point in the table's top-level
+  B-tree, leaving it roughly half full. Rows are now spilled to a
+  `streamsort.Store` keyed by (addrHash, packed SubKey) as contracts and
+  PreAlloc storage entities are written, then drained with
+  `cursor.AppendDup` in ascending main-key/dup order once nothing else
+  writes the table. Table contents (every k/v) and the state root are
+  unchanged; only insertion order, which governs the top-level tree's
+  page-fill density. On a 1 GB store (20,972 contracts, 423,314
+  StoragesTrie rows), leaf pages went from 27,987 to 25,258 and branch
+  pages from 5,472 to 5,424.
+- **code_pattern runtimes are made on demand.** `create2_deploys` and
+  `create_preimage_deploys` kept every byte-unique runtime (`max_diff*`,
+  `unique_jumpdest*`) in memory for the whole build: 100 000 × 64 KiB is
+  6.1 GiB per entity. Expand now sets the code hash and a `LazyCode`, and
+  each writer makes the runtime when it writes that account, then drops it.
+  reth writes its alloc contracts in chunks of 10 000 for the same reason.
+  The state root and the written bytes are unchanged. On a spec with
+  4 × 20 000 unique runtimes (3.6 GiB of code), geth peak RSS went from
+  8.8 GB to 2.0 GB. The 64 GiB `salt_count`/`count` cap and the
+  resident-code warning are removed, because the runtimes are no longer
+  resident.
+- **reth: trie and storage rows are written key-ordered.** AccountsTrie rows
+  arrive from the HashBuilder in post-order, not ascending key order; they
+  are now buffered per 2-nibble prefix and Put sorted (at most 16 length-1
+  ancestor rows total go straight through — too few to need ordering).
+  HashedStorages slots are now written in ascending keccak(slot) order
+  instead of raw slot-key order. Table contents and the state root are
+  unchanged; only insertion order, which governs libmdbx page-fill density.
+- **reth: HashedAccounts is written in hashed-key order.** Rows were `Put` in
+  RNG draw order, so every insert landed inside the key range and libmdbx split
+  pages in the middle: leaf fill ~0.50 and one level deeper than needed. They
+  are now `cursor.Append`ed in AddrHash order from the sorted stream the account
+  trie is built from, which fills pages densely. Table contents (every k/v) and
+  the state root are unchanged. On a 1 GB store, HashedAccounts leaf pages went
+  from 33,272 to 16,880.
+- **reth: trie cache rows follow alloy_trie's rule.** AccountsTrie and
+  StoragesTrie stored a row for every hashed branch ("full emissions"),
+  including bottom branches whose children are all leaves. reth never stores
+  those; their hash lives in the parent row. A row is now stored iff
+  `tree_mask | hash_mask != 0`, as alloy_trie and reth's own genesis init do.
+  Roots are unchanged. On a 1 GB store, AccountsTrie went from 441,257 to
+  96,198 rows.
+- **Erigon snapshot files now written by the pinned Erigon's own code, in
+  its current format.** state-actor wrote every domain file with pure-Go
+  ports of Erigon's v1.0 format: `.kv` words raw (no pattern dictionary),
+  `.bt` / `.kvi` / `.kvei` from ported builders, every name at `v1.0`. A
+  24,576-byte EEST test contract took 24,577 B and seven 4 KB pages per
+  uncached read instead of ~200 B and one, so distinct-contract calls
+  benchmarked at 0.64 of a mainnet-derived store; written the way Erigon
+  writes it, 0.98. The cgo build now hands each domain to
+  `internal/erigon/erigonfiles`, which follows Erigon's `buildFileRange`:
+  `seg.Compressor` at the schema's compression, `recsplit` for `.kvi`,
+  `btindex` for `.bt` + `.kvei`, names and versions from `statecfg.Schema`.
+  At the pin that is `v2.0` `.kv`/`.bt` and `v1.2` `.kvei` for accounts,
+  storage and code, and `v2.2` `.kv` + `v2.1` `.kvi` for commitment (no
+  `.kvei`), the versions the benchmark's glamsterdam-devnet-7 build
+  writes. The ports (`internal/erigon/{seg,btindex,recsplit,existence,eliasfano}`)
+  are deleted; `snap` keeps the datadir layout and takes a `FileSet`.
+  Erigon pin moves from `14273f79a6` (bal-devnet-7) to main `546790a6a7`
+  (Go 1.26 builder); the commitment engine fallback now drives Erigon's
+  `ParallelPatriciaHashed`. Generated datadirs no longer open on Erigon
+  builds that predate the v2 file versions. State root and RPC answers
+  are unchanged. Each domain's compressor and `.kvi` build run with
+  `STATE_ACTOR_ERIGON_FILE_WORKERS` workers (default min(NumCPU, 8);
+  replaces `STATE_ACTOR_RECSPLIT_WORKERS`); Erigon writes the same bytes
+  at any worker count. Erigon's compressor holds a raw copy of a domain
+  plus two compressed ones while it compresses, so each domain's sorted
+  source is dropped as soon as the compressor has read it, and the
+  commitment domain (the largest) is written after the others instead
+  of beside them. A 50 GB store (seed 42) peaks at 133 GB of disk
+  against 135 GB before, and generates in 20m18s against 16m05s.
 - **Besu DB now created with all 17 mainnet Bonsai column families.**
   A fresh mainnet Besu init creates every `KeyValueSegmentIdentifier`
   segment with `BONSAI` in its format set, including `CHAIN_PRUNER_STATE`
@@ -57,6 +130,44 @@
   `--archive`).
 
 ### Added
+- **`--account-model=mainnet` draws auto-fill accounts from a mainnet census.**
+  `normal` (default) is unchanged. `mainnet` draws each storage-less account's
+  class (EOA, EIP-7702 delegation, contract), nonce and balance size, and the
+  contract's code from a census of a mainnet-derived reth store's 354.8M
+  accounts: mostly a few reused 45-byte clone codes, as on mainnet's 41.7M
+  storage-less contracts. Storage accounts, giants included, take the census's
+  nonce/balance shape. Not supported with `--binary-trie`. Changes the state
+  root; recorded in the manifest and restored by `reproduce`.
+- **`--storage-model=mainnet` draws auto-fill contract storage from a mainnet
+  shape.** `normal` (default) gives every contract ~35 KiB of 32-byte random
+  values, so a mainnet-sized store holds a few million mid-size contracts.
+  `mainnet` draws each contract's slot count and each value's length from a
+  full walk of a mainnet-derived reth store (25.2M storage accounts, 1.49B
+  slots, the bloated test contract excluded): 55 % of contracts hold one slot,
+  97 % hold at most 28, and values are stored at their significant length (20
+  bytes for half of them). Contracts with 1M+ slots ("giants") follow
+  mainnet's alpha≈1 power law with no cap; their number grows with the store.
+  A giant's slots are generated on demand in keccak order: no client holds
+  them in memory or sorts them through a temp store. The contract count
+  follows from the storage budget; contracts come out of the account budget,
+  so the total account count is unchanged. On a 1 GB store: 117,038
+  contracts plus one 1M-slot giant (normal: 20,972 contracts). Realized
+  storage over 20 seeds spans 1.55x of the budget at 1 GB and 1.04x at
+  100 GB. Not supported with `--binary-trie`. Changes the state root;
+  recorded in the manifest and restored by `reproduce`.
+
+- **reth: `--mdbx-fill-profile` and `--mdbx-fill` control MDBX B-tree page
+  fill.** `migrated` and `aged` target a reference node's measured leaf fill
+  per table via `MDBX_opt_split_reserve`, switched right before each
+  table's writes; `--mdbx-fill` overrides individual tables on top of a
+  profile. Also forces libmdbx's `prefer_waf_insteadof_balance` to reth's
+  own default, which changes the page fill of every non-ascending insert
+  for every run — including the default `fresh` profile — reading the
+  option back and failing generation on a mismatch. Both flags are
+  rejected for clients other than reth; the resolved profile, per-table
+  fill/reserve, and libmdbx version land in the run manifest's
+  `result.mdbx_fill`.
+
 - **Nethermind flat-DB state generation (closes #111).** `--client=nethermind`
   now always writes Nethermind's flat-state layout — an eighth RocksDB
   (`<db>/flat`, a column DB holding Account/Storage leaf rows plus the relocated

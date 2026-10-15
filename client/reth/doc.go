@@ -43,8 +43,9 @@
 // Each batch flows through WriteEOAs/WriteContracts to MDBX; the
 // per-account RLP is then keyed by AddrHash and written into a
 // Pebble-backed temp sorter (mirrors client/nethermind/entitygen_cgo.go).
-// After all batches the sorter is iterated in addrHash-sorted order and
-// each leaf is fed into the HashBuilder for the global state root.
+// After all batches the sorter is iterated in addrHash-sorted order: each
+// leaf is fed into the HashBuilder for the global state root, and its
+// HashedAccounts row is cursor.Append'ed in that same sorted pass.
 //
 // Peak Phase 4 RAM is bounded by one batch (~20 MiB at 100K accounts ×
 // ~200 B per *Account) plus Pebble's 64 MiB write buffer plus
@@ -84,7 +85,7 @@
 //
 //   - run_cgo.go / run_stub.go: build-tag-gated RunCgo entry point
 //   - dbs_cgo.go: MDBX env + RocksDB column families
-//   - data_writer_cgo.go: per-EOA state-table writes
+//   - data_writer_cgo.go: per-EOA archive rows (AccountChangeSets, AccountsHistory)
 //   - bytecode_writer_cgo.go: deduped bytecode writes; LegacyAnalyzed for
 //     contracts, Eip7702 for delegation designators (the variant tag is
 //     load-bearing even though the state root ignores it.)

@@ -1,4 +1,4 @@
-// Vendored from github.com/erigontech/erigon execution/commitment/hex_concurrent_patricia_hashed.go @ 14273f79a6 (production pin).
+// Vendored from github.com/erigontech/erigon execution/commitment/hex_concurrent_patricia_hashed.go @ 14273f79a6 (prior pin; Golden A checks it against the current pin's engine).
 // Modifications: package commitment -> hph; build tag; R3 strip: Process/ParallelHashSort/CanDoConcurrentNext + Trie-interface methods (Close/SetTrace/SetTraceDomain/EnableWarmupCache/Get+SetCapture/EnableCsvMetrics/SetParticularTrace/Variant/Reset/Release/ResetContext/RootHash/RootTrie); TrieContextFactory relocated to directdrive.go
 //
 //go:build cgo_erigon_commitment

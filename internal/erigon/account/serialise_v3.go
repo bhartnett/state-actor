@@ -7,7 +7,7 @@ import (
 )
 
 // SerialiseV3 encodes a for the Erigon E3 snapshot Accounts domain
-// (`v1.0-accounts.<from>-<to>.kv` value bytes). Mirrors upstream
+// (`<version>-accounts.<from>-<to>.kv` value bytes). Mirrors upstream
 // `execution/types/accounts/account.go::SerialiseV3` — the E3 snapshot
 // encoder (distinct from Erigon's older MDBX PlainState codec, which
 // uses a fieldset bitmask instead of fixed length-prefixed fields).

@@ -290,7 +290,7 @@ NETH_CFG
             #   "[rpc] download of segments not complete yet. please
             #   wait StageSnapshots to finish"
             # Daemon uses the state-actor-erigon image's locally-built
-            # erigon binary (stock upstream, pinned commit 14273f79a6 — no
+            # erigon binary (stock upstream, pinned commit 546790a6a7 — no
             # patches). Override the image's default entrypoint to
             # /usr/local/bin/erigon since state-actor-erigon is a
             # multi-purpose image (state-actor binary + erigon binary).

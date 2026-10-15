@@ -32,3 +32,11 @@ func TestEthrexGoldenStateRoot(t *testing.T) {
 			return ethrex.Run(ctx, cfg, ethrex.Options{})
 		})
 }
+
+func TestEthrexGoldenStateRootGiants(t *testing.T) {
+	cfg := e2e_testing.GoldenGiantRootCfg(t.TempDir())
+	e2e_testing.AssertGoldenGiantRoot(t, "ethrex", cfg,
+		func(ctx context.Context, cfg generator.Config) (*generator.Stats, error) {
+			return ethrex.Run(ctx, cfg, ethrex.Options{})
+		})
+}

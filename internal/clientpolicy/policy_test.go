@@ -41,13 +41,45 @@ func TestValidateForClient_UnknownRejected(t *testing.T) {
 }
 
 func TestValidateForClient_BinaryTrieGethOnly(t *testing.T) {
-	if err := ValidateForClient("geth", FlagValues{BinaryTrie: true}); err != nil {
-		t.Errorf("geth + --binary-trie should be allowed: %v", err)
+	for _, m := range []string{"", "normal"} {
+		if err := ValidateForClient("geth", FlagValues{BinaryTrie: true, StorageModel: m}); err != nil {
+			t.Errorf("geth + --binary-trie + --storage-model=%q should be allowed: %v", m, err)
+		}
+	}
+	if err := ValidateForClient("geth", FlagValues{BinaryTrie: true, StorageModel: "mainnet"}); err == nil {
+		t.Error("geth + --binary-trie + --storage-model=mainnet should be rejected")
+	}
+	if err := ValidateForClient("geth", FlagValues{BinaryTrie: true, AccountModel: "mainnet"}); err == nil {
+		t.Error("geth + --binary-trie + --account-model=mainnet should be rejected")
 	}
 	for _, c := range []string{"nethermind", "besu", "reth", "erigon", "ethrex", "nimbus"} {
 		err := ValidateForClient(c, FlagValues{BinaryTrie: true})
 		if err == nil || !strings.Contains(err.Error(), "EIP-7864") {
 			t.Errorf("%s + --binary-trie should reject with EIP-7864 reason, got %v", c, err)
+		}
+	}
+}
+
+func TestValidateForClient_MdbxFillRethOnly(t *testing.T) {
+	if err := ValidateForClient("reth", FlagValues{MdbxFillProfile: "migrated"}); err != nil {
+		t.Errorf("reth + --mdbx-fill-profile=migrated should be allowed: %v", err)
+	}
+	if err := ValidateForClient("reth", FlagValues{MdbxFillOverridden: true}); err != nil {
+		t.Errorf("reth + --mdbx-fill overrides should be allowed: %v", err)
+	}
+	for _, c := range []string{"geth", "nethermind", "besu", "erigon", "ethrex"} {
+		if err := ValidateForClient(c, FlagValues{MdbxFillProfile: "migrated"}); err == nil || !strings.Contains(err.Error(), "only supported with --client=reth") {
+			t.Errorf("%s + --mdbx-fill-profile=migrated should reject with reth-only reason, got %v", c, err)
+		}
+		if err := ValidateForClient(c, FlagValues{MdbxFillOverridden: true}); err == nil || !strings.Contains(err.Error(), "only supported with --client=reth") {
+			t.Errorf("%s + --mdbx-fill overrides should reject with reth-only reason, got %v", c, err)
+		}
+	}
+	// "fresh" (the flag default) must be allowed everywhere, same as leaving
+	// MdbxFillProfile unset.
+	for _, c := range []string{"geth", "nethermind", "besu", "reth", "erigon", "ethrex"} {
+		if err := ValidateForClient(c, FlagValues{MdbxFillProfile: "fresh"}); err != nil {
+			t.Errorf("%s + --mdbx-fill-profile=fresh should be allowed: %v", c, err)
 		}
 	}
 }

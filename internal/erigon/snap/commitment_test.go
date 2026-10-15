@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/ethereum/state-actor/internal/erigon/seg"
 )
 
 // streamOf builds a BranchStream over a fixed, pre-sorted row set.
@@ -22,32 +20,11 @@ func streamOf(rows [][2][]byte) BranchStream {
 	}
 }
 
-// readKV returns the (key, value) pairs of the commitment .kv in file order.
-func readKV(t *testing.T, dir string, r StepRange) [][2][]byte {
-	t.Helper()
-	dec, err := seg.NewDecompressor(BuildDataFilename(DomainDir(dir), "v1.0", DomainCommitment, r))
-	if err != nil {
-		t.Fatalf("NewDecompressor: %v", err)
-	}
-	defer dec.Close()
-	var out [][2][]byte
-	for entry, err := range dec.Iterate(context.Background()) {
-		if err != nil {
-			t.Fatalf("Iterate: %v", err)
-		}
-		out = append(out, [2][]byte{
-			append([]byte(nil), entry.Key...),
-			append([]byte(nil), entry.Value...),
-		})
-	}
-	return out
-}
-
 // TestWriteCommitment_StateRowSplice pins the M1c sorted splice: the
 // KeyCommitmentState row must land at its binary sort position inside the
 // branch stream — including the boundary cases (state last, state only) and
-// the collision case (state SHADOWS an equal branch key) — and the .kv must
-// be fully ascending.
+// the collision case (state SHADOWS an equal branch key) — and the .kv
+// entries must be fully ascending.
 func TestWriteCommitment_StateRowSplice(t *testing.T) {
 	keyState := []byte{0xde, 0xad, 0xbe, 0xef}
 	r := StepRange{From: 0, To: 1}
@@ -85,8 +62,8 @@ func TestWriteCommitment_StateRowSplice(t *testing.T) {
 
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			w, err := NewWriter(dir, Settings{Seed: int64(100 + i)})
+			files := memFiles{}
+			w, err := NewWriter(t.TempDir(), Settings{Seed: int64(100 + i), Files: files})
 			if err != nil {
 				t.Fatalf("NewWriter: %v", err)
 			}
@@ -95,7 +72,7 @@ func TestWriteCommitment_StateRowSplice(t *testing.T) {
 			if err := WriteCommitment(context.Background(), w, r, keyState, streamOf(tc.rows), uint64(len(tc.rows))); err != nil {
 				t.Fatalf("WriteCommitment: %v", err)
 			}
-			got := readKV(t, dir, r)
+			got := files[DomainCommitment]
 
 			if len(got) != len(tc.want) {
 				t.Fatalf("row count = %d, want %d", len(got), len(tc.want))
@@ -120,7 +97,7 @@ func TestWriteCommitment_StateRowSplice(t *testing.T) {
 // silently short .kv.
 func TestWriteCommitment_StreamErrorSurfaces(t *testing.T) {
 	dir := t.TempDir()
-	w, err := NewWriter(dir, Settings{Seed: 7})
+	w, err := NewWriter(dir, Settings{Seed: 7, Files: memFiles{}})
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
 	}
@@ -144,7 +121,7 @@ func TestWriteCommitment_StreamErrorSurfaces(t *testing.T) {
 // last-write-wins path would have silently dropped the branch row).
 func TestWriteCommitment_StateCollisionErrors(t *testing.T) {
 	dir := t.TempDir()
-	w, err := NewWriter(dir, Settings{Seed: 8})
+	w, err := NewWriter(dir, Settings{Seed: 8, Files: memFiles{}})
 	if err != nil {
 		t.Fatalf("NewWriter: %v", err)
 	}

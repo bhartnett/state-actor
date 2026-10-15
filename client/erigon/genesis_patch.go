@@ -30,7 +30,7 @@ const (
 )
 
 // Bucket names — verbatim from upstream Erigon's kv.* constants
-// (db/kv/tables.go on commit 14273f79a6). Note: kv.Headers's string is
+// (db/kv/tables.go on commit 546790a6a7). Note: kv.Headers's string is
 // "Header" (singular) and kv.HeadBlockKey / kv.HeadHeaderKey are
 // SINGLE-KEY tables whose own bucket name doubles as the only key in
 // them — that's upstream's convention, not a state-actor invention.

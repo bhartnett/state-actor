@@ -30,7 +30,7 @@ inputs:
     description: 'go test -tags string (e.g. "cgo_besu oracle")'
     required: true
   test-pkg:
-    description: 'go test package path (e.g. "./client/besu/")'
+    description: 'space-separated go test package paths (e.g. "./client/besu/")'
     required: true
   test-run-filter:
     description: |
@@ -94,6 +94,7 @@ runs:
         if [ -n "$TEST_RUN_FILTER" ]; then
           run_filter=(-run "$TEST_RUN_FILTER")
         fi
+        read -ra test_pkgs <<< "$TEST_PKG"
         docker run --rm \
           -v "$VOL":/oracle-data \
           -v "$PWD/_artifacts":/result \
@@ -105,7 +106,7 @@ runs:
           -e SPAMOOR=/usr/local/bin/spamoor \
           -e REQUIRE_SPAMOOR=1 \
           "$IMAGE_TAG" \
-          go test -tags "$TEST_TAGS" "$TEST_PKG" "${run_filter[@]}" -v -timeout 45m
+          go test -tags "$TEST_TAGS" "${test_pkgs[@]}" "${run_filter[@]}" -v -timeout 45m
         docker volume rm -f "$VOL" >/dev/null 2>&1 || true
 
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

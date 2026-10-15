@@ -117,6 +117,29 @@ func TestStorageRoot_EquivalenceWithStackTrie(t *testing.T) {
 	}
 }
 
+// SortedRoot over the same pairs, pre-sorted by keccak(key), must give the same root.
+func TestSortedRoot_EquivalenceWithStackTrie(t *testing.T) {
+	pairs := fixturePairs100()
+	sort.Slice(pairs, func(i, j int) bool {
+		a, b := crypto.Keccak256Hash(pairs[i].key[:]), crypto.Keccak256Hash(pairs[j].key[:])
+		return bytes.Compare(a[:], b[:]) < 0
+	})
+	sorted := func(yield func(keyHash, rawKey, value common.Hash) bool) {
+		for _, p := range pairs {
+			if !yield(crypto.Keccak256Hash(p.key[:]), p.key, p.value) {
+				return
+			}
+		}
+	}
+	got, err := SortedRoot(sorted, newStackTrieBuilder(), nil)
+	if err != nil {
+		t.Fatalf("SortedRoot: %v", err)
+	}
+	if want := stackTrieRootMaterialised(pairs); got != want {
+		t.Errorf("storage root mismatch:\n got  %s\n want %s", got.Hex(), want.Hex())
+	}
+}
+
 // TestStorageRoot_EmptyInputs is the EmptyRootHash pin. An iter that
 // yields no pairs (or only zero-valued pairs) must return the canonical
 // empty-MPT root 0x56e81f17… so the storage trie root field on the

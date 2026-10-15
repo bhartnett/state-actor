@@ -213,7 +213,23 @@ func TestHashBuilderRootMatchesStackTrieProperty(t *testing.T) {
 			rng.Read(values[i])
 		}
 
-		hb := NewHashBuilder(func(StoredNibbles, BranchNodeCompact) error { return nil })
+		// Every emitted BranchNodeCompact must satisfy `tree_mask ⊆
+		// state_mask` + `hash_mask ⊆ state_mask`. This is the broad-coverage
+		// fuzz that complements the deterministic fixtures in
+		// hash_builder_emissions_test.go — random keys + value-length
+		// straddling 32 bytes exercise the same extension-wrapping branches
+		// that triggered the 215K-entity bloatnet panic at scale.
+		hb := NewHashBuilder(func(_ StoredNibbles, n BranchNodeCompact) error {
+			if leftover := n.TreeMask & ^n.StateMask; leftover != 0 {
+				t.Errorf("trial %d (n=%d, seed=%#x): tree_mask has bits not in state_mask: state=0x%04x tree=0x%04x leftover=0x%04x",
+					trial, len(keys), seed, n.StateMask, n.TreeMask, leftover)
+			}
+			if leftover := n.HashMask & ^n.StateMask; leftover != 0 {
+				t.Errorf("trial %d (n=%d, seed=%#x): hash_mask has bits not in state_mask: state=0x%04x hash=0x%04x leftover=0x%04x",
+					trial, len(keys), seed, n.StateMask, n.HashMask, leftover)
+			}
+			return nil
+		})
 		for i := range keys {
 			if err := hb.AddLeaf(bytesToNibbles(keys[i]), values[i]); err != nil {
 				t.Fatalf("trial %d AddLeaf: %v", trial, err)
@@ -229,40 +245,6 @@ func TestHashBuilderRootMatchesStackTrieProperty(t *testing.T) {
 			t.Errorf("trial %d (n=%d, seed=%#x):\n  got=%s\n  want=%s",
 				trial, len(keys), seed, got.Hex(), st.Hash().Hex())
 		}
-
-		// Same inputs run through fullEmissions mode: the root must still
-		// match StackTrie (gate-split must not affect root computation),
-		// AND every emitted BranchNodeCompact must satisfy
-		// `tree_mask ⊆ state_mask` + `hash_mask ⊆ state_mask`. This is
-		// the broad-coverage fuzz that complements the deterministic
-		// 32-leaf fixture in hash_builder_full_emissions_test.go — random
-		// keys + value-length straddling 32 bytes exercise the same
-		// extension-wrapping branches that triggered the 215K-entity
-		// bloatnet panic at scale.
-		var fullEmissionsCount int
-		fullEmit := func(_ StoredNibbles, n BranchNodeCompact) error {
-			fullEmissionsCount++
-			if leftover := n.TreeMask & ^n.StateMask; leftover != 0 {
-				t.Errorf("trial %d (fullEmissions, n=%d, seed=%#x): tree_mask has bits not in state_mask: state=0x%04x tree=0x%04x leftover=0x%04x",
-					trial, len(keys), seed, n.StateMask, n.TreeMask, leftover)
-			}
-			if leftover := n.HashMask & ^n.StateMask; leftover != 0 {
-				t.Errorf("trial %d (fullEmissions, n=%d, seed=%#x): hash_mask has bits not in state_mask: state=0x%04x hash=0x%04x leftover=0x%04x",
-					trial, len(keys), seed, n.StateMask, n.HashMask, leftover)
-			}
-			return nil
-		}
-		hbFE := NewHashBuilderFullEmissions(fullEmit)
-		for i := range keys {
-			if err := hbFE.AddLeaf(bytesToNibbles(keys[i]), values[i]); err != nil {
-				t.Fatalf("trial %d AddLeaf (fullEmissions): %v", trial, err)
-			}
-		}
-		if gotFE := hbFE.Root(); gotFE != got {
-			t.Errorf("trial %d (fullEmissions, n=%d): root diverged from default mode\n  default=%s\n  fullEm =%s",
-				trial, len(keys), got.Hex(), gotFE.Hex())
-		}
-		_ = fullEmissionsCount // keep variable; useful when adding instrumentation
 	}
 }
 

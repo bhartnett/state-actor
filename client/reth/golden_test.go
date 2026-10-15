@@ -23,3 +23,11 @@ func TestRethGoldenStateRoot(t *testing.T) {
 			return RunCgo(ctx, cfg, Options{})
 		})
 }
+
+func TestRethGoldenStateRootGiants(t *testing.T) {
+	cfg := e2e_testing.GoldenGiantRootCfg(t.TempDir())
+	e2e_testing.AssertGoldenGiantRoot(t, "reth", cfg,
+		func(ctx context.Context, cfg generator.Config) (*generator.Stats, error) {
+			return RunCgo(ctx, cfg, Options{})
+		})
+}
